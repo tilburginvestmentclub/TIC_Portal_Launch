@@ -1804,7 +1804,7 @@ def main():
     if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
     
     # Unpack everything
-    members, f_port, q_port, msgs, props, calendar_events, f_tot, q_tot, df_votes = load_data()
+    members, f_port, q_port, msgs, props, calendar_events, f_total, q_total, df_votes = load_data()
 
     if not st.session_state['logged_in']:
         c1, c2, c3 = st.columns([1,1.5,1])
@@ -1944,6 +1944,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
