@@ -714,13 +714,118 @@ def authenticate(username, password, df):
     user = df[(df['u'] == username) & (df['p'] == password)]
     return user.iloc[0] if not user.empty else None
 
-def create_pdf_report(fund_port, quant_port):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, txt="TIC Quarterly Report", ln=1, align='C')
-    return pdf.output(dest='S').encode('latin-1')
+class PDFReport(FPDF):
+    def header(self):
+        # Brand Color Line (Gold)
+        self.set_fill_color(212, 175, 55) 
+        self.rect(0, 0, 210, 5, 'F')
+        # Title
+        self.set_font('Arial', 'B', 16)
+        self.cell(0, 10, 'Tilburg Investment Club | Official Report', 0, 1, 'C')
+        self.ln(5)
 
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()} - Internal Use Only - Generated via TIC Portal', 0, 0, 'C')
+
+def create_enhanced_pdf_report(f_port, q_port, f_total, q_total, nav_f, nav_q, report_title, proposals):
+    pdf = PDFReport()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # --- 1. EXECUTIVE SUMMARY ---
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, f"Executive Summary: {report_title}", ln=True)
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 6, f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True)
+    pdf.ln(5)
+    
+    # Financial Metrics
+    pdf.set_fill_color(240, 240, 240)
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(60, 8, "Metric", 1, 0, 'L', 1)
+    pdf.cell(60, 8, "Value (EUR)", 1, 1, 'R', 1)
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(60, 8, "Total AUM", 1, 0, 'L')
+    pdf.cell(60, 8, f"{f_total + q_total:,.2f}", 1, 1, 'R')
+    pdf.cell(60, 8, "Fundamental Fund", 1, 0, 'L')
+    pdf.cell(60, 8, f"{f_total:,.2f}", 1, 1, 'R')
+    pdf.cell(60, 8, "Quant Fund", 1, 0, 'L')
+    pdf.cell(60, 8, f"{q_total:,.2f}", 1, 1, 'R')
+    pdf.ln(5)
+
+    # --- 2. MARKET CONTEXT (New) ---
+    # We pull this live to give context to the AUM numbers
+    macro = fetch_macro_data() 
+    vix = macro.get('VIX', {}).get('value', 0)
+    yield_10y = macro.get('10Y Treasury', {}).get('value', 0)
+    
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, "Market Context", ln=True)
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 6, f"Market Volatility (VIX): {vix:.2f} | US 10Y Yield: {yield_10y:.2f}%", ln=True)
+    pdf.ln(5)
+
+    # --- 3. GOVERNANCE & STRATEGY (New) ---
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, "Governance & Strategic Decisions", ln=True)
+    
+    # Filter Proposals
+    applied_props = [p for p in proposals if str(p.get('Applied')) == '1']
+    active_props = [p for p in proposals if str(p.get('Applied')) == '0']
+    
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(0, 8, "Recently Executed / Applied:", ln=True)
+    pdf.set_font("Arial", "", 9)
+    
+    if applied_props:
+        for p in applied_props:
+            # Format: [Fundamental] BUY: AMD
+            line = f"[{p.get('Dept')}] {p.get('Type')}: {p.get('Item')} - {p.get('Description')[:60]}..."
+            # Draw a small green checkmark (using ASCII or simplified char)
+            pdf.cell(5, 6, "x", 0, 0) 
+            pdf.cell(0, 6, line, ln=True)
+    else:
+        pdf.cell(0, 6, "No recent executed proposals.", ln=True)
+        
+    pdf.ln(2)
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(0, 8, "Active Voting Items:", ln=True)
+    pdf.set_font("Arial", "", 9)
+    
+    if active_props:
+        for p in active_props:
+            line = f"[{p.get('Dept')}] {p.get('Type')}: {p.get('Item')} (Ends: {p.get('End_Date')})"
+            pdf.cell(5, 6, "-", 0, 0)
+            pdf.cell(0, 6, line, ln=True)
+    else:
+        pdf.cell(0, 6, "No active voting items.", ln=True)
+    
+    pdf.ln(10)
+
+    # --- 4. PORTFOLIO SNAPSHOTS ---
+    # (Keep your existing Holdings tables here...)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, "Top Fundamental Holdings", ln=True)
+    pdf.set_font("Arial", "B", 9)
+    pdf.cell(30, 8, "Ticker", 1, 0, 'L', 1)
+    pdf.cell(80, 8, "Asset Name", 1, 0, 'L', 1)
+    pdf.cell(40, 8, "Weight", 1, 1, 'R', 1)
+    
+    pdf.set_font("Arial", "", 9)
+    if not f_port.empty and 'target_weight' in f_port.columns:
+        top_f = f_port.sort_values('target_weight', ascending=False).head(8)
+        for _, row in top_f.iterrows():
+            name = str(row.get('name', 'Unknown'))[:35]
+            ticker = str(row.get('ticker', ''))
+            weight = float(row.get('target_weight', 0)) * 100
+            pdf.cell(30, 7, ticker, 1, 0, 'L')
+            pdf.cell(80, 7, name, 1, 0, 'L')
+            pdf.cell(40, 7, f"{weight:.1f}%", 1, 1, 'R')
+    
+    return pdf.output(dest='S').encode('latin-1')
+    
 def send_new_message(from_user, to_user, subject, body):
     file_path = "data/TIC_Messages.xlsx"
     
@@ -1225,10 +1330,25 @@ def render_admin_panel(user, members_df, f_port, q_port, total_aum, proposals, v
 
     # --- TAB 3: REPORTING ---
     with tab3:
-        st.subheader("Export Data")
-        if st.button("Generate PDF"):
-            b64 = base64.b64encode(create_pdf_report(f_port, q_port)).decode()
-            st.markdown(f'<a href="data:application/octet-stream;base64,{b64}" download="TIC_Report.pdf">Download PDF</a>', unsafe_allow_html=True)
+        st.subheader("Generate Official Reports")
+        st.caption("Creates a PDF snapshot of the current portfolio state, AUM, and governance log.")
+        
+        with st.form("gen_report"):
+            report_title = st.text_input("Report Title", value=f"Status Report - {datetime.now().strftime('%B %Y')}")
+            
+            if st.form_submit_button("Generate PDF"):
+                # FIX: Pass 'proposals' to the function
+                pdf_bytes = create_enhanced_pdf_report(
+                    f_port, q_port, 
+                    f_total, q_total, 
+                    nav_f, nav_q, 
+                    report_title,
+                    proposals # <--- NEW ARGUMENT
+                )
+                
+                fname = f"TIC_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
+                st.success("✅ Report generated successfully!")
+                st.download_button("📥 Download PDF", pdf_bytes, fname, "application/pdf")
     
     # --- TAB 4: ATTENDANCE ---
     with tab4:
@@ -2152,6 +2272,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
