@@ -1981,7 +1981,7 @@ def main():
       
         st.caption(f"NAV Fund: €{nav_f:.2f}")
         st.caption(f"NAV Quant: €{nav_q:.2f}")
-          st.divider()
+        st.divider()
         
         menu = ["Simulation", "Inbox", "Library", "Calendar", "Settings"] 
 
@@ -2072,6 +2072,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
