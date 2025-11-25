@@ -2094,12 +2094,26 @@ def render_quant_dashboard(user, portfolio, proposals):
     
     with c1:
         st.subheader("Strategy Allocation")
+        
         if not portfolio.empty:
+            # Ensure market_value is numeric and clean
+            # This fixes the TypeError if data came in as strings
+            portfolio['market_value'] = pd.to_numeric(portfolio['market_value'], errors='coerce').fillna(0.0)
+            
             model_col = 'model' if 'model' in portfolio.columns else None
+            
             if model_col:
+                # Group by Strategy
                 grouped = portfolio.groupby(model_col)[['market_value']].sum().reset_index()
+                
+                # Calculate Total AUM
                 total_aum = grouped['market_value'].sum()
-                grouped['allocation'] = grouped['market_value'] / total_aum
+                
+                # FIX: Check for Zero Division
+                if total_aum > 0:
+                    grouped['allocation'] = grouped['market_value'] / total_aum
+                else:
+                    grouped['allocation'] = 0.0
                 
                 st.dataframe(
                     grouped,
@@ -2107,18 +2121,22 @@ def render_quant_dashboard(user, portfolio, proposals):
                     hide_index=True,
                     column_config={
                         model_col: st.column_config.TextColumn("Strategy"),
-                        "market_value": st.column_config.NumberColumn("Value", format="€%.2f"),
+                        "market_value": st.column_config.NumberColumn("Total Value", format="€%.2f"),
                         "allocation": st.column_config.ProgressColumn("Alloc", format="%.2f%%", min_value=0, max_value=1)
                     }
                 )
             else:
                 st.info("No 'Model' column found.")
+        else:
+            st.info("Portfolio is empty.")
 
     with c2:
         if not portfolio.empty:
             group_col = 'model' if 'model' in portfolio.columns else 'sector'
             if group_col in portfolio.columns:
-                fig = px.pie(portfolio, values='market_value', names=group_col, hole=0.4)
+                # Filter out zero values for cleaner chart
+                chart_data = portfolio[portfolio['market_value'] > 0]
+                fig = px.pie(chart_data, values='market_value', names=group_col, hole=0.4)
                 st.plotly_chart(fig, use_container_width=True)
 
     # --- 3. DETAILED HOLDINGS ---
@@ -2482,6 +2500,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
