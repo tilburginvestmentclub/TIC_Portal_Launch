@@ -1541,23 +1541,85 @@ def render_risk_macro_dashboard(portfolio):
     with t1:
         st.subheader("Portfolio Correlation (Live)")
         
-        # 1. Extract tickers from the portfolio dataframe
+        # 1. Fetch Data
         if not portfolio.empty and 'ticker' in portfolio.columns:
-            # Get unique tickers, drop N/A
-            my_tickers = portfolio['ticker'].dropna().unique().tolist()
+            # Filter Cash out
+            my_tickers = [t for t in portfolio['ticker'].unique() if isinstance(t,str) and "CASH" not in t.upper()]
             
             if len(my_tickers) > 1:
                 with st.spinner(f"Calculating correlations for {len(my_tickers)} assets..."):
                     corr_matrix = fetch_correlation_data(my_tickers)
                 
                 if not corr_matrix.empty:
-                    st.plotly_chart(px.imshow(corr_matrix, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r", zmin=-1, zmax=1), use_container_width=True)
-                else:
-                    st.warning("Could not fetch market data. Please check ticker symbols in Excel.")
+                    # A. Render the Plot
+                    st.plotly_chart(
+                        px.imshow(
+                            corr_matrix, 
+                            text_auto=".2f", 
+                            aspect="auto", 
+                            color_continuous_scale="RdBu_r", 
+                            zmin=-1, zmax=1
+                        ), 
+                        use_container_width=True
+                    )
+                    
+                    # B. AUTOMATED INTERPRETATION & WARNINGS
+                    st.divider()
+                    st.subheader("🧠 Risk Analysis")
+                    
+                    # Logic to find high correlations
+                    # We look at the upper triangle of the matrix to avoid duplicates (A-B vs B-A)
+                    high_risk_pairs = []
+                    watch_list = []
+                    hedges = []
+                    
+                    cols = corr_matrix.columns
+                    for i in range(len(cols)):
+                        for j in range(i+1, len(cols)):
+                            val = corr_matrix.iloc[i, j]
+                            pair_name = f"{cols[i]} ↔ {cols[j]}"
+                            
+                            if val > 0.85:
+                                high_risk_pairs.append(f"{pair_name} ({val:.2f})")
+                            elif val > 0.65:
+                                watch_list.append(f"{pair_name} ({val:.2f})")
+                            elif val < -0.5:
+                                hedges.append(f"{pair_name} ({val:.2f})")
+                    
+                    c_warn, c_info = st.columns(2)
+                    
+                    with c_warn:
+                        if high_risk_pairs:
+                            st.error(f"🚨 **Critical Concentration ({len(high_risk_pairs)} pairs)**")
+                            st.caption("These assets move almost identically. You are not diversified here.")
+                            for item in high_risk_pairs[:5]: # Show top 5
+                                st.markdown(f"- {item}")
+                            if len(high_risk_pairs) > 5: st.caption(f"...and {len(high_risk_pairs)-5} more.")
+                        else:
+                            st.success("✅ No critical concentration risks found (>0.85).")
+
+                    with c_info:
+                        if hedges:
+                            st.info(f"🛡️ **Natural Hedges ({len(hedges)} pairs)**")
+                            st.caption("These assets tend to move in opposite directions, stabilizing the portfolio.")
+                            for item in hedges[:5]:
+                                st.markdown(f"- {item}")
+                        elif watch_list:
+                            st.warning(f"⚠️ **Watch List ({len(watch_list)} pairs)**")
+                            st.caption("Moderate correlation. Monitor these sectors.")
+                            with st.expander("View Pairs"):
+                                for item in watch_list: st.write(item)
+                        else:
+                            st.write("Portfolio correlation is balanced.")
+
+                    # Educational Note
+                    st.markdown("---")
+                    st.caption("ℹ️ **How to read this:** 1.0 = Perfect positive correlation (Move together). 0.0 = No relationship. -1.0 = Perfect negative correlation (Move opposite).")
+
             else:
-                st.info("Add at least 2 distinct assets to 'Fundamentals' to see the correlation matrix.")
+                st.info("Add at least 2 distinct equity assets to 'Fundamentals' to generate the matrix.")
         else:
-            st.warning("Portfolio is empty. Add positions in TIC_Portfolios.xlsx")
+            st.warning("Portfolio is empty or contains only Cash. Add positions in TIC_Database_Master.")
     
     with t2:
         st.subheader("Global Markets")
@@ -2072,6 +2134,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
