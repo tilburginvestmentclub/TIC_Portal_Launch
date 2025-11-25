@@ -2357,7 +2357,7 @@ def main():
         default_index = 0
         current_selection = st.session_state.get('previous_choice', 'Dashboard')
         
-        for i, option in enumerate(menu_options):
+        for i, option in enumerate(menu):
             # Flexible match: "Inbox" matches "Inbox (2)"
             # This handles the label changing when unread count updates
             if current_selection.split(" (")[0] in option:
@@ -2365,7 +2365,7 @@ def main():
                 break
         
         # 3. Render the Radio Button
-        nav = st.radio("Navigation", menu_options, index=default_index)
+        nav = st.radio("Navigation", menu, index=default_index)
         
         # 4. Save the selection immediately for next time
         # We strip the " (1)" badge so the base name is saved (e.g. "Inbox")
@@ -2443,6 +2443,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
