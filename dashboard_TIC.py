@@ -509,9 +509,8 @@ def load_data():
     df_votes = get_data_from_sheet("Votes")
     if not df_votes.empty:
         df_votes['Proposal_ID'] = df_votes['Proposal_ID'].astype(str)
-
-    # RETURN 9 VALUES
-    return members, f_port, q_port, messages, proposals, full_calendar, f_total, q_total, df_votes    
+        
+    return members, f_port, q_port, messages, proposals, full_calendar, f_total, q_total, df_votes, nav_fund, nav_quant
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
@@ -2051,6 +2050,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
