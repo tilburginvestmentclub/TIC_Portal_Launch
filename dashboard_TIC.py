@@ -1033,31 +1033,40 @@ def render_voting_section(user, proposals, votes_df, target_dept):
             with c_act:
                 st.write("")
                 
-                user_has_voted = False
-                if not votes_df.empty:
-                    user_vote = votes_df[(votes_df['Proposal_ID'] == p_id) & (votes_df['Username'] == user['u'])]
-                    if not user_vote.empty: user_has_voted = True
+                # Guest check
+                if user.get('r') == 'Guest':
+                    st.info("🔒 Guest View")
+                    st.caption("Voting disabled.")
                 
-                if user_has_voted:
-                    st.success("✅ Voted")
                 else:
-                    c_y, c_n = st.columns(2)
-                    if c_y.button("YES", key=f"y_{p_id}"):
-                        if cast_vote_gsheet(p_id, user['u'], "YES"): st.success("Voted!"); st.rerun()
-                    if c_n.button("NO", key=f"n_{p_id}"):
-                        if cast_vote_gsheet(p_id, user['u'], "NO"): st.error("Voted!"); st.rerun()
-                
-                if user.get('admin', False) and total > 0 and yes_count > no_count:
-                    if st.button("Execute", key=f"exe_{p_id}"):
-                        client = init_connection()
-                        sheet = client.open("TIC_Database_Master")
-                        ws = sheet.worksheet("Proposals")
-                        cell = ws.find(p_id)
-                        if cell:
-                            ws.update_cell(cell.row, 7, 1)
-                            st.success("Applied!")
-                            st.cache_data.clear()
-                            st.rerun()
+                    # (Keep your existing voting logic here)
+                    user_has_voted = False
+                    if not votes_df.empty:
+                        user_vote = votes_df[(votes_df['Proposal_ID'] == p_id) & (votes_df['Username'] == user['u'])]
+                        if not user_vote.empty: user_has_voted = True
+                    
+                    if user_has_voted:
+                        st.success("✅ Voted")
+                    else:
+                        c_y, c_n = st.columns(2)
+                        if c_y.button("YES", key=f"y_{p_id}"):
+                            if cast_vote_gsheet(p_id, user['u'], "YES"): st.success("Voted!"); st.rerun()
+                        if c_n.button("NO", key=f"n_{p_id}"):
+                            if cast_vote_gsheet(p_id, user['u'], "NO"): st.error("Voted!"); st.rerun()
+                    
+                    # Admin Execute (Only show if Admin AND Passing)
+                    if user.get('admin', False) and total > 0 and yes_count > no_count:
+                        if st.button("Execute", key=f"exe_{p_id}"):
+                            # ... (Keep existing execute logic) ...
+                            client = init_connection()
+                            sheet = client.open("TIC_Database_Master")
+                            ws = sheet.worksheet("Proposals")
+                            cell = ws.find(p_id)
+                            if cell:
+                                ws.update_cell(cell.row, 7, 1)
+                                st.success("Applied!")
+                                st.cache_data.clear()
+                                st.rerun()
                             
 def render_leaderboard(user, members_df):
     st.title("🏆 Simulation Leaderboard")
@@ -2464,21 +2473,27 @@ def render_documents(user):
         with st.container(border=True):
             st.markdown(f"### Digital Agreement: {user['n']}")
             
-            CONTRACTS_FOLDER = "data/contracts"
-            contract_filename = f"{user['u']}_contract.pdf"
-            contract_path = os.path.join(CONTRACTS_FOLDER, contract_filename)
+            # --- NEW: GUEST CHECK ---
+            if user.get('r') == 'Guest':
+                st.warning("🔒 Contracts are private documents available only to registered members.")
+                st.caption("Please log in with a member account to view your agreement.")
             
-            if os.path.exists(contract_path):
-                with open(contract_path, "rb") as pdf_file:
-                    pdf_bytes = pdf_file.read()
-                st.success("✅ Signed Contract Available")
-                st.download_button("Download PDF Copy", pdf_bytes, contract_filename, "application/pdf")
             else:
-                st.warning("⚠️ No digital contract found.")
+                # (Keep existing contract logic)
+                CONTRACTS_FOLDER = "data/contracts"
+                contract_filename = f"{user['u']}_contract.pdf"
+                contract_path = os.path.join(CONTRACTS_FOLDER, contract_filename)
+                
+                if os.path.exists(contract_path):
+                    with open(contract_path, "rb") as pdf_file:
+                        pdf_bytes = pdf_file.read()
+                    st.success("✅ Signed Contract Available")
+                    st.download_button("Download PDF Copy", pdf_bytes, contract_filename, "application/pdf")
+                else:
+                    st.warning("⚠️ No digital contract found.")
 
     with t2: 
         # --- GOOGLE DRIVE INTEGRATION ---
-        # REPLACE THIS with your actual Folder ID
         DRIVE_FOLDER_ID = "1tDtD3PAKLHWH5YMRrcroPQ36HJ-osDin" 
         DRIVE_URL = f"https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID}"
         
@@ -2494,12 +2509,17 @@ def render_documents(user):
             
             # Option 2: Embedded View (IF folder is public/shared)
             st.write("**Quick View**")
-            # We use an iframe to show the drive folder directly
-            components.iframe(
-                f"https://drive.google.com/embeddedfolderview?id={DRIVE_FOLDER_ID}#list",
-                height=600,
-                scrolling=True
-            )
+            
+            # --- NEW: GUEST CHECK FOR EMBED ---
+            # Sometimes you might want Guests to see this, but if it's private data:
+            if user.get('r') == 'Guest':
+                 st.info("🔒 Archive preview disabled for guests. Click the link above to request access.")
+            else:
+                components.iframe(
+                    f"https://drive.google.com/embeddedfolderview?id={DRIVE_FOLDER_ID}#list",
+                    height=600,
+                    scrolling=True
+                )
 # ==========================================
 # 5. MAIN
 # ==========================================
@@ -2522,24 +2542,24 @@ def main():
             with st.form("login_form", clear_on_submit=True):
                 st.subheader("Member Login")
                 
-                # Using keys helps manage state, ensuring inputs don't clear until submit
                 u = st.text_input("Username", key="login_u")
                 p = st.text_input("Password", type="password", key="login_p")
                 
-                submitted = st.form_submit_button("Log In", type="primary")
+                # Create two columns for the buttons
+                c_log, c_guest = st.columns(2)
                 
-                if submitted:
+                # --- BUTTON 1: MEMBER LOGIN ---
+                if c_log.form_submit_button("Log In", type="primary"):
                     user = authenticate(u, p, members)
                     if user is not None:
                         st.session_state['user'] = user.to_dict()
                         st.session_state['logged_in'] = True
-
-                        # Update Google Sheet with current timestamp
+                        
+                        # 1. Track Last Login (Google Sheets)
                         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
-                        # We use the existing helper function
                         update_member_field_in_gsheet(user['u'], "Last Login", timestamp)
                         
-                        # Time-aware greeting logic (from previous suggestion)
+                        # 2. Time-aware greeting
                         h = datetime.now().hour
                         if 5 <= h < 12: greeting = "Good Morning"
                         elif 12 <= h < 18: greeting = "Good Afternoon"
@@ -2549,6 +2569,28 @@ def main():
                         st.rerun()
                     else: 
                         st.error("Invalid Username or Password")
+                
+                # --- BUTTON 2: GUEST ACCESS ---
+                if c_guest.form_submit_button("Guest Access"):
+                    # Create a Fake User Profile
+                    guest_user = {
+                        'u': 'guest',
+                        'n': 'Guest Visitor',
+                        'r': 'Guest',       # Role = Guest
+                        'd': 'General',     # Department
+                        's': 'General',
+                        'email': 'guest@tilburg.edu',
+                        'admin': False,
+                        'value': 0,
+                        'contribution': 0,
+                        'units_fund': 0,
+                        'units_quant': 0,
+                        'liq_pending': 0
+                    }
+                    st.session_state['user'] = guest_user
+                    st.session_state['logged_in'] = True
+                    st.toast("👋 Welcome, Guest! (Read-Only Mode)")
+                    st.rerun()
             # --- END LOGIN FORM ---
         return
     user = st.session_state['user']
@@ -2710,6 +2752,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
