@@ -1940,10 +1940,11 @@ def main():
     elif nav == "Inbox": render_inbox(user, msgs, members)
     elif nav == "Library": render_documents(user)
     elif nav == "Settings": render_offboarding(user)
-    elif nav == "Admin Panel": render_admin_panel(user, members, f_port, q_port, total_aum = f_total + q_total, props, df_votes)
+    elif nav == "Admin Panel": render_admin_panel(user, members, f_port, q_port, f_total+q_total, props, df_votes)
 
 if __name__ == "__main__":
     main()
+
 
 
 
