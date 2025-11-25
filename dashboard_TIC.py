@@ -1242,15 +1242,22 @@ def render_upcoming_events_sidebar(all_events):
 def render_admin_panel(user, members_df, f_port, q_port, f_total, q_total, proposals, votes_df, nav_f, nav_q):
     st.title("🔒 Admin Console")
     st.info(f"Logged in as: {user['n']} ({user['r']})")
-    
-    # Define Path for saving member list
-    MEMBER_FILE_PATH = "data/Member List.xlsx"
-    
     # 1. TABS
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["👥 Member Database", "💰 Treasury", "📄 Reporting", "✅ Attendance", "🗳️ Governance"])
+    tabs = ["👥 Member Database", "💰 Treasury", "📄 Reporting", "✅ Attendance", "🗳️ Governance"]
+    if 'admin_active_tab' not in st.session_state:
+        st.session_state['admin_active_tab'] = tabs[0]
     
+    try:
+        curr_index = tabs.index(st.session_state['admin_active_tab'])
+    except:
+        curr_index = 0
+        
+    active_tab = st.radio("Admin Menu", tabs, index=curr_index, horizontal=True, label_visibility="collapsed")
+    
+    st.session_state['admin_active_tab'] = active_tab
+    st.divider()    
     # --- TAB 1: MEMBER DATABASE (READ/WRITE) ---
-    with tab1:
+    if active_tab == "👥 Member Database":
         st.subheader("Manage Membership")
         st.markdown("Edit roles, emails, or status directly below.")
         if 'members_db' not in st.session_state: st.session_state['members_db'] = members_df
@@ -1276,7 +1283,7 @@ def render_admin_panel(user, members_df, f_port, q_port, f_total, q_total, propo
                 st.error(f"Failed to save file: {e}. Is the file open in Excel?")
 
     # --- TAB 2: TREASURY & LIQUIDATION ---
-    with tab2:
+    elif active_tab == "💰 Treasury":
         with st.expander("💰 Process Capital Injection (Treasurer)"):
             c_nav1, c_nav2 = st.columns(2)
             c_nav1.metric("NAV Fundamental", f"€{nav_f:.2f}")
@@ -1395,9 +1402,10 @@ def render_admin_panel(user, members_df, f_port, q_port, f_total, q_total, propo
 
         else:
             st.info("✅ No pending liquidation requests.")
+        pass
 
     # --- TAB 3: REPORTING ---
-    with tab3:
+    elif active_tab == "📄 Reporting":
         st.subheader("Generate Official Reports")
         st.caption("Creates a PDF snapshot of the current portfolio state, AUM, and governance log.")
         
@@ -1428,9 +1436,10 @@ def render_admin_panel(user, members_df, f_port, q_port, f_total, q_total, propo
                 file_name=fname,
                 mime="application/pdf"
             )
+        pass
     
     # --- TAB 4: ATTENDANCE ---
-    with tab4:
+    elif active_tab == "✅ Attendance":
         st.subheader("Meeting Attendance Tracker")
         dates = ['2023-10-01', '2023-10-15', '2023-11-01', '2023-11-15']
         num_members = len(members_df)
@@ -1454,9 +1463,9 @@ def render_admin_panel(user, members_df, f_port, q_port, f_total, q_total, propo
             st.session_state['attendance_df'] = edited_att
             st.success("Attendance records updated.")
         st.metric("Average Attendance Rate", "85%")
-        
+        pass
     # --- TAB 5: GOVERNANCE ---
-    with tab5:
+    elif active_tab == "🗳️ Governance":
         st.subheader("Proposal Archive & Live Results")
         
         if not proposals:
@@ -1519,6 +1528,7 @@ def render_admin_panel(user, members_df, f_port, q_port, f_total, q_total, propo
                     st.dataframe(votes_df, use_container_width=True, hide_index=True)
                 else:
                     st.write("No votes cast yet.")
+        pass
 
 def render_ticker_tape(data_dict):
     """Renders a ticker tape using the delta from the last hour."""
@@ -2191,11 +2201,10 @@ def render_inbox(user, messages, all_members_df):
             
             # Mark as Read Button (Only show if currently unread)
             if not is_read:
-                # We use a unique key for every button based on message ID
                 if st.button("Mark as Read", key=f"read_{m.get('id')}"):
-                    # Call the GSheet Read Helper
-                    # Assuming 'id' column exists (ensure your sheet has an 'ID' column)
                     if mark_message_read_gsheet(m.get('id'), user['u']):
+                        # FIX: Set flag so main() knows to keep us here
+                        st.session_state['stay_on_inbox'] = True
                         st.rerun()
 
 def render_documents(user):
@@ -2342,10 +2351,27 @@ def main():
         # Only show Admin Panel if user has admin=True
         if user.get('admin', False):
             menu.append("Admin Panel")
-            
-        nav = st.radio("Navigation", menu)
-        render_upcoming_events_sidebar(calendar_events)
         
+        # 2. Determine the Correct Index to keep us on the same page
+        # We look at the 'previous_choice' stored in session state
+        default_index = 0
+        current_selection = st.session_state.get('previous_choice', 'Dashboard')
+        
+        for i, option in enumerate(menu_options):
+            # Flexible match: "Inbox" matches "Inbox (2)"
+            # This handles the label changing when unread count updates
+            if current_selection.split(" (")[0] in option:
+                default_index = i
+                break
+        
+        # 3. Render the Radio Button
+        nav = st.radio("Navigation", menu_options, index=default_index)
+        
+        # 4. Save the selection immediately for next time
+        # We strip the " (1)" badge so the base name is saved (e.g. "Inbox")
+        st.session_state['previous_choice'] = nav.split(" (")[0]
+        
+        render_upcoming_events_sidebar(calendar_events)
         st.divider()
         if st.button("Log Out"): st.session_state.clear(); st.rerun()
         
@@ -2417,6 +2443,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
