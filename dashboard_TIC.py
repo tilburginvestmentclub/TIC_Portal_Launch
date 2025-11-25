@@ -464,9 +464,21 @@ def load_data():
         real_market_events = fetch_company_events(fund_tickers)
         
     full_calendar = real_market_events + manual_events
-    proposals = [] # Placeholder
+    
+    # 5. VOTING SYSTEM (PROPOSALS & VOTES)
+    # Load Proposals
+    df_props = get_data_from_sheet("Proposals")
+    proposals = []
+    if not df_props.empty:
+        df_props['ID'] = df_props['ID'].astype(str)
+        proposals = df_props.to_dict('records')
 
-    return members, fund_portfolio, quant_portfolio, messages, proposals, full_calendar, f_total, q_total
+    # Load Votes
+    df_votes = get_data_from_sheet("Votes")
+    if not df_votes.empty:
+        df_votes['Proposal_ID'] = df_votes['Proposal_ID'].astype(str)
+
+    return members, fund_portfolio, quant_portfolio, messages, proposals, full_calendar, f_total, q_total, df_votes
     
 # ==========================================
 # 3. HELPER FUNCTIONS
@@ -1874,6 +1886,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
