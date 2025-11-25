@@ -856,8 +856,9 @@ def send_new_message(from_user, to_user, subject, body):
 # ==========================================
 # 4. VIEW COMPONENTS
 # ==========================================
+
 def render_voting_section(user, proposals, votes_df, target_dept):
-    """Renders the voting UI with a Red/Green split bar."""
+    """Renders the voting UI with a Circular Donut Chart."""
     st.header(f"🗳️ {target_dept} Governance")
     
     # Filter active proposals
@@ -871,100 +872,85 @@ def render_voting_section(user, proposals, votes_df, target_dept):
         p_id = str(p['ID'])
         
         with st.container(border=True):
-            c_desc, c_act = st.columns([3, 1])
+            # Layout: Description (Left) | Chart (Middle) | Buttons (Right)
+            c_desc, c_chart, c_act = st.columns([3, 1.5, 1.5])
             
+            # --- 1. CALCULATE VOTES ---
+            if not votes_df.empty:
+                votes_df['Proposal_ID'] = votes_df['Proposal_ID'].astype(str)
+                relevant_votes = votes_df[votes_df['Proposal_ID'] == p_id]
+                yes_count = len(relevant_votes[relevant_votes['Vote'] == 'YES'])
+                no_count = len(relevant_votes[relevant_votes['Vote'] == 'NO'])
+            else:
+                yes_count, no_count = 0, 0
+            
+            total = yes_count + no_count
+
+            # --- COLUMN 1: DESCRIPTION ---
             with c_desc:
                 st.subheader(f"{p.get('Type')}: {p.get('Item')}")
                 st.write(p.get('Description'))
                 st.caption(f"Ends: {p.get('End_Date')}")
-                
-                # --- 1. CALCULATE VOTES ---
-                if not votes_df.empty:
-                    votes_df['Proposal_ID'] = votes_df['Proposal_ID'].astype(str)
-                    relevant_votes = votes_df[votes_df['Proposal_ID'] == p_id]
-                    yes_count = len(relevant_votes[relevant_votes['Vote'] == 'YES'])
-                    no_count = len(relevant_votes[relevant_votes['Vote'] == 'NO'])
-                else:
-                    yes_count, no_count = 0, 0
-                
-                total = yes_count + no_count
-                
-                # --- 2. RENDER RED/GREEN BAR ---
+
+            # --- COLUMN 2: CIRCULAR CHART ---
+            with c_chart:
                 if total > 0:
-                    # We use Graph Objects to build a custom stacked bar
-                    fig = go.Figure()
+                    fig = go.Figure(data=[go.Pie(
+                        labels=['For', 'Against'],
+                        values=[yes_count, no_count],
+                        hole=0.6,
+                        marker=dict(colors=['#228B22', '#D2042D']),
+                        textinfo='none',
+                        hoverinfo='label+value+percent'
+                    )])
                     
-                    # Green Bar (YES)
-                    fig.add_trace(go.Bar(
-                        y=[''], x=[yes_count], name='For', orientation='h',
-                        marker=dict(color='#228B22'), # Forest Green
-                        text=f"{yes_count}", textposition='auto', hoverinfo='name+x'
-                    ))
-                    
-                    # Red Bar (NO)
-                    fig.add_trace(go.Bar(
-                        y=[''], x=[no_count], name='Against', orientation='h',
-                        marker=dict(color='#D2042D'), # Cherry Red
-                        text=f"{no_count}", textposition='auto', hoverinfo='name+x'
-                    ))
-                    
-                    # Style it to look like a Progress Bar (No axes, tight margins)
                     fig.update_layout(
-                        barmode='stack',
-                        xaxis=dict(showgrid=False, showticklabels=False, visible=False),
-                        yaxis=dict(showgrid=False, showticklabels=False, visible=False),
                         showlegend=False,
                         margin=dict(l=0, r=0, t=0, b=0),
-                        height=35, # Thin bar height
+                        height=120,
+                        annotations=[dict(text=f"{yes_count}v{no_count}", x=0.5, y=0.5, font_size=16, showarrow=False, font=dict(color="white"))],
                         paper_bgcolor='rgba(0,0,0,0)',
                         plot_bgcolor='rgba(0,0,0,0)'
                     )
                     
-                    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-                    st.caption(f"For: {yes_count} | Against: {no_count}")
+                    # FIX: Added unique key=f"chart_{p_id}" to prevent Duplicate ID error
+                    st.plotly_chart(
+                        fig, 
+                        use_container_width=True, 
+                        config={'displayModeBar': False}, 
+                        key=f"chart_{p_id}"
+                    )
                 else:
-                    st.write("Waiting for first vote...")
+                    st.write("") # Spacer
+                    st.caption("No votes yet")
 
+            # --- COLUMN 3: ACTIONS ---
             with c_act:
-                # Check if User has already voted
+                st.write("")
+                
                 user_has_voted = False
                 if not votes_df.empty:
-                    votes_df['Proposal_ID'] = votes_df['Proposal_ID'].astype(str)
-                    user_vote = votes_df[
-                        (votes_df['Proposal_ID'] == p_id) & 
-                        (votes_df['Username'] == user['u'])
-                    ]
-                    if not user_vote.empty:
-                        user_has_voted = True
+                    user_vote = votes_df[(votes_df['Proposal_ID'] == p_id) & (votes_df['Username'] == user['u'])]
+                    if not user_vote.empty: user_has_voted = True
                 
-                # Buttons
                 if user_has_voted:
                     st.success("✅ Voted")
                 else:
                     c_y, c_n = st.columns(2)
                     if c_y.button("YES", key=f"y_{p_id}"):
-                        if cast_vote_gsheet(p_id, user['u'], "YES"):
-                            st.success("Voted YES")
-                            st.rerun()
+                        if cast_vote_gsheet(p_id, user['u'], "YES"): st.success("Voted!"); st.rerun()
                     if c_n.button("NO", key=f"n_{p_id}"):
-                        if cast_vote_gsheet(p_id, user['u'], "NO"):
-                            st.error("Voted NO")
-                            st.rerun()
+                        if cast_vote_gsheet(p_id, user['u'], "NO"): st.error("Voted!"); st.rerun()
                 
-                # Admin Execute Button (Simple Majority)
                 if user.get('admin', False) and total > 0 and yes_count > no_count:
-                    st.divider()
                     if st.button("Execute", key=f"exe_{p_id}"):
-                        # Mark 'Applied' = 1
                         client = init_connection()
                         sheet = client.open("TIC_Database_Master")
                         ws = sheet.worksheet("Proposals")
-                        # Find row by ID
                         cell = ws.find(p_id)
                         if cell:
-                            # Assuming 'Applied' is the 7th column (G)
                             ws.update_cell(cell.row, 7, 1)
-                            st.success("Proposal Applied!")
+                            st.success("Applied!")
                             st.cache_data.clear()
                             st.rerun()
                             
@@ -2346,6 +2332,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
