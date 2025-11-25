@@ -2047,48 +2047,6 @@ def render_fundamental_dashboard(user, portfolio, proposals):
 
 def render_quant_dashboard(user, portfolio, proposals):
     st.title(f"🤖 Quant Lab")
-    # MONTE CARLO SIMULATION
-    st.markdown("### 🎲 Monte Carlo Risk Engine")
-    st.caption("Project future portfolio performance based on random walk simulations (Geometric Brownian Motion).")
-    
-    c_param, c_plot = st.columns([1, 3])
-    
-    with c_param:
-        st.write("**Settings**")
-        n_sims = st.slider("Simulations", 10, 100, 50)
-        horizon = st.slider("Horizon (Days)", 30, 365, 252)
-        mu = st.slider("Expected Return", -10, 30, 8) / 100
-        sigma = st.slider("Volatility", 5, 50, 15) / 100
-        
-    with c_plot:
-        dt = 1/252
-        S0 = 100
-        dates = pd.date_range(start=datetime.now(), periods=horizon+1)
-        sim_data = {'Date': dates}
-        
-        for i in range(n_sims):
-            Z = np.random.normal(0, 1, horizon)
-            daily_returns = np.exp((mu - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z)
-            daily_returns = np.insert(daily_returns, 0, 1.0)
-            sim_data[f'Sim_{i}'] = S0 * np.cumprod(daily_returns)
-            
-        df_mc = pd.DataFrame(sim_data).melt(id_vars='Date', var_name='Sim', value_name='Value')
-        
-        fig = px.line(df_mc, x='Date', y='Value', color='Sim', 
-                     color_discrete_sequence=px.colors.qualitative.Pastel)
-        fig.update_layout(showlegend=False, xaxis_title=None, yaxis_title="Value (Base 100)")
-        fig.update_traces(opacity=0.5, line=dict(width=1))
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Stats
-        final_vals = df_mc[df_mc['Date'] == dates[-1]]['Value']
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Median", f"{final_vals.median():.0f}")
-        c2.metric("Worst Case (5%)", f"{np.percentile(final_vals, 5):.0f}")
-        c3.metric("Best Case (95%)", f"{np.percentile(final_vals, 95):.0f}")
-
-    st.divider()
-    
     # --- 2. STRATEGY OVERVIEW ---
     c1, c2 = st.columns([2, 1])
     
@@ -2156,6 +2114,47 @@ def render_quant_dashboard(user, portfolio, proposals):
                 "ticker": st.column_config.TextColumn("Asset"),
             }
         )
+        
+    st.divider()
+    # MONTE CARLO SIMULATION
+    st.markdown("### 🎲 Monte Carlo Risk Engine")
+    st.caption("Project future portfolio performance based on random walk simulations (Geometric Brownian Motion).")
+    
+    c_param, c_plot = st.columns([1, 3])
+    
+    with c_param:
+        st.write("**Settings**")
+        n_sims = st.slider("Simulations", 10, 100, 50)
+        horizon = st.slider("Horizon (Days)", 30, 365, 252)
+        mu = st.slider("Expected Return", -10, 30, 8) / 100
+        sigma = st.slider("Volatility", 5, 50, 15) / 100
+        
+    with c_plot:
+        dt = 1/252
+        S0 = 100
+        dates = pd.date_range(start=datetime.now(), periods=horizon+1)
+        sim_data = {'Date': dates}
+        
+        for i in range(n_sims):
+            Z = np.random.normal(0, 1, horizon)
+            daily_returns = np.exp((mu - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z)
+            daily_returns = np.insert(daily_returns, 0, 1.0)
+            sim_data[f'Sim_{i}'] = S0 * np.cumprod(daily_returns)
+            
+        df_mc = pd.DataFrame(sim_data).melt(id_vars='Date', var_name='Sim', value_name='Value')
+        
+        fig = px.line(df_mc, x='Date', y='Value', color='Sim', 
+                     color_discrete_sequence=px.colors.qualitative.Pastel)
+        fig.update_layout(showlegend=False, xaxis_title=None, yaxis_title="Value (Base 100)")
+        fig.update_traces(opacity=0.5, line=dict(width=1))
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Stats
+        final_vals = df_mc[df_mc['Date'] == dates[-1]]['Value']
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Median", f"{final_vals.median():.0f}")
+        c2.metric("Worst Case (5%)", f"{np.percentile(final_vals, 5):.0f}")
+        c3.metric("Best Case (95%)", f"{np.percentile(final_vals, 95):.0f}")
         
 def render_inbox(user, messages, all_members_df):
     # --- 1. FILTER MESSAGES FOR CURRENT USER ---
@@ -2500,6 +2499,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
