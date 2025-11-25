@@ -2476,6 +2476,8 @@ def main():
             st.image(TIC_LOGO, width=200)
             st.title("TIC Portal")
             st.info("Welcome to the Internal Management System")
+
+            st.caption("By logging in, you acknowledge that this portal is for informational purposes only and does not constitute a binding financial statement.")
             
             # --- NEW: CLEAN, ALWAYS-VISIBLE LOGIN FORM ---
             with st.form("login_form", clear_on_submit=True):
@@ -2649,9 +2651,22 @@ def main():
         st.caption("© 2025 Tilburg Investment Club | Internal Portal v1.0")
     with c_foot2:
         st.caption("Data provided by Yahoo Finance & TIC Research Team")
-
+        
+    # LEGAL DISCLAIMER
+    with st.expander("⚖️ Legal Disclaimer (Click to Read)", expanded=False):
+        st.caption("""
+        **No Financial Advice:** This dashboard is for internal educational and informational purposes only. 
+        Nothing herein constitutes an offer to sell, a solicitation of an offer to buy, or a recommendation of any security or strategy.
+        
+        **No Rights Derived:** The 'Current Value' and 'AUM' figures are estimates based on delayed market data. 
+        Official liquidation values are determined solely by the Treasurer at the time of withdrawal. 
+        Members cannot derive any legal rights from the figures displayed on this portal.
+        
+        **Data Accuracy:** Market data is provided 'as-is' via third-party APIs (Yahoo Finance) and may contain errors or delays.
+        """)
 if __name__ == "__main__":
     main()
+
 
 
 
