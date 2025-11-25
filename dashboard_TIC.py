@@ -2291,8 +2291,7 @@ def main():
             st.caption(f"Fund: €{(u_f*nav_f):,.0f} | Quant: €{(u_q*nav_q):,.0f}")
         
       
-        st.caption(f"NAV Fund: €{nav_f:.2f}")
-        st.caption(f"NAV Quant: €{nav_q:.2f}")
+        st.caption(f"NAV Fund: €{nav_f:.2f}" | f"NAV Quant: €{nav_q:.2f}")
         st.divider()
         
         user_msgs = [m for m in msgs if m['to_user'] in [user['u'], 'all', user['d']]]
@@ -2407,6 +2406,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
