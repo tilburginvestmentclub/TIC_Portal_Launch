@@ -1908,15 +1908,14 @@ def render_offboarding(user):
                 elif len(new_p1) < 4:
                     st.warning("⚠️ Password is too short.")
                 else:
-                    # Save to Google Sheet
-                    # This relies on your existing update_member_field_in_gsheet helper
                    if update_member_field_in_gsheet(user['u'], "Password", new_p1):
                         st.success("✅ Password updated successfully!")
                         st.info("Logging you out to re-authenticate...")
+                       
                         time.sleep(2) # Give user time to read the success message
                         st.session_state.clear()
                         st.rerun()
-                    else:
+                     else:
                         st.error("❌ Update failed. Database error.")
             
 def render_simulation(user):
@@ -2651,6 +2650,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
