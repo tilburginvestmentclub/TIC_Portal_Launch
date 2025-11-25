@@ -357,35 +357,7 @@ def fetch_real_benchmark_data(portfolio_df):
     
 @st.cache_data(ttl=60)
 def load_data():
-    # --- 1. LOAD PORTFOLIOS & CALCULATE ASSETS FIRST ---
-    # We need the money totals BEFORE we process members
-    f_port = get_data_from_sheet("Fundamentals")
-    q_port = get_data_from_sheet("Quant")
-    
-    # Calculate Total Assets (Cash + Equities)
-    f_total = 0.0
-    if not f_port.empty: 
-        f_port.columns = f_port.columns.astype(str).str.lower()
-        # Clean numbers
-        if 'target_weight' in f_port.columns:
-            f_port['target_weight'] = pd.to_numeric(f_port['target_weight'], errors='coerce').fillna(0)
-        if 'total' in f_port.columns:
-            val = f_port['total'].iloc[0]
-            # Clean the string if needed
-            try: f_total = float(str(val).replace('€','').replace(',','').replace(' ',''))
-            except: f_total = 0.0
-
-    q_total = 0.0
-    if not q_port.empty:
-        q_port.columns = q_port.columns.astype(str).str.lower()
-        if 'ticker' in q_port.columns: q_port = q_port.rename(columns={'ticker': 'model_id'})
-        if 'target_weight' in q_port.columns: q_port = q_port.rename(columns={'target_weight': 'allocation'})
-        if 'total' in q_port.columns:
-            val = q_port['total'].iloc[0]
-            try: q_total = float(str(val).replace('€','').replace(',','').replace(' ',''))
-            except: q_total = 0.0
-
-    # --- 2. LOAD MEMBERS & CALCULATE NAV ---
+    # --- 1. CONFIGURATION ---
     ROLE_MAP = {
         'ab': {'r': 'Advisory Board', 'd': 'Advisory', 's': 'Board', 'admin': False},
         'qr': {'r': 'Quant Researcher', 'd': 'Quant', 's': 'Quant Research', 'admin': False},
@@ -400,54 +372,99 @@ def load_data():
         'other': {'r': 'Member', 'd': 'General', 's': 'General', 'admin': False},
     }
 
-    df_mem = get_data_from_sheet("Members")
+    def clean_float(val):
+        if pd.isna(val) or val == '': return 0.0
+        try: return float(str(val).replace('€', '').replace(',', '').replace(' ', ''))
+        except: return 0.0
+
+    # --- 2. LOAD PORTFOLIOS & CALCULATE LIVE ASSETS ---
+    f_port = get_data_from_sheet("Fundamentals")
+    q_port = get_data_from_sheet("Quant")
     
-    # A. Calculate Total Units Outstanding (The Denominator)
+    # HELPER: Calculate Real-Time Fund Value
+    def calculate_live_total(df):
+        total_val = 0.0
+        if not df.empty:
+            df.columns = df.columns.astype(str).str.lower()
+            
+            # 1. Get Tickers (No Cash)
+            tickers = [t for t in df['ticker'].unique() if isinstance(t, str) and "CASH" not in t.upper()]
+            
+            # 2. Fetch Live Prices
+            prices = fetch_live_prices_with_change(tickers)
+            
+            # 3. Sum up (Equity * Price) + Cash
+            for index, row in df.iterrows():
+                ticker = str(row.get('ticker', ''))
+                units = clean_float(row.get('units', 0))
+                
+                if "CASH" in ticker.upper():
+                    # Cash: Use value from sheet directly
+                    # (Assuming Market Value column is accurate for Cash)
+                    val = clean_float(row.get('market_value', 0))
+                else:
+                    # Equity: Use Live Price * Units
+                    live_price = prices.get(ticker, {}).get('price', 0.0)
+                    # Fallback to sheet value if API fails/returns 0
+                    if live_price > 0:
+                        val = live_price * units
+                    else:
+                        val = clean_float(row.get('market_value', 0))
+                
+                total_val += val
+                
+                # OPTIONAL: Update the dataframe in-memory so tables show live values
+                # df.at[index, 'market_value'] = val 
+                
+        return total_val, df
+
+    # Calculate Live Totals
+    f_total, f_port = calculate_live_total(f_port)
+    q_total, q_port = calculate_live_total(q_port)
+
+    # Normalize column names for Quant if needed (model_id -> ticker logic)
+    if not q_port.empty:
+        if 'ticker' in q_port.columns: q_port = q_port.rename(columns={'ticker': 'model_id'})
+        if 'target_weight' in q_port.columns: q_port = q_port.rename(columns={'target_weight': 'allocation'})
+
+    # --- 3. LOAD MEMBERS & CALCULATE NAV ---
+    df_mem = get_data_from_sheet("Members")
+    members_list = []
+    
+    # Calculate Total Units Outstanding (Denominator)
     total_units_fund = 0.0
     total_units_quant = 0.0
     
     if not df_mem.empty:
-        # Ensure columns exist
-        if 'Units_Fund' not in df_mem.columns: df_mem['Units_Fund'] = 0.0
-        if 'Units_Quant' not in df_mem.columns: df_mem['Units_Quant'] = 0.0
-        
-        # Sum them up
-        total_units_fund = pd.to_numeric(df_mem['Units_Fund'], errors='coerce').sum()
-        total_units_quant = pd.to_numeric(df_mem['Units_Quant'], errors='coerce').sum()
+        if 'Units_Fund' in df_mem.columns:
+            total_units_fund = pd.to_numeric(df_mem['Units_Fund'], errors='coerce').fillna(0).sum()
+        if 'Units_Quant' in df_mem.columns:
+            total_units_quant = pd.to_numeric(df_mem['Units_Quant'], errors='coerce').fillna(0).sum()
 
-    # B. Calculate NAV (Price per Unit)
-    # If no units exist, price defaults to 100.00
+    # CALCULATE LIVE NAV (Price per Unit)
+    # If Fund = €50k and Units = 500 -> NAV = €100
     nav_fund = f_total / total_units_fund if total_units_fund > 0 else 100.00
     nav_quant = q_total / total_units_quant if total_units_quant > 0 else 100.00
 
-    # C. Build Member List with Real Values
-    members_list = []
     if not df_mem.empty:
         for _, row in df_mem.iterrows():
-            # ... (Role parsing logic same as before) ...
             role_code = str(row.get('Role', 'other')).strip().lower()
             role_data = ROLE_MAP.get(role_code, {'r': 'Member', 'd': 'General', 's': 'General', 'admin': False})
             name = str(row.get('Name', 'Unknown')).strip()
             uname = name.lower().replace(" ", ".")
             email = str(row.get('Email', f"{uname}@tilburg.edu")).strip()
             
-            try: liq_val = int(row.get('Liq Pending', 0))
+            try: liq_val = int(float(row.get('Liq Pending', 0)))
             except: liq_val = 0
             
-            # GET INDIVIDUAL UNITS
-            try: u_f = float(row.get('Units_Fund', 0))
-            except: u_f = 0.0
-            try: u_q = float(row.get('Units_Quant', 0))
-            except: u_q = 0.0
+            # Get Individual Units
+            u_f = clean_float(row.get('Units_Fund', 0))
+            u_q = clean_float(row.get('Units_Quant', 0))
             
-            # CALCULATE REAL VALUE
-            # (Units_F * Price_F) + (Units_Q * Price_Q)
+            # CALCULATE REAL STAKE VALUE
+            # This ensures member value moves exactly with the portfolio
             real_value = (u_f * nav_fund) + (u_q * nav_quant)
             
-            # Initial Investment (Static from sheet)
-            try: init_inv = float(row.get('Initial Investment', 0))
-            except: init_inv = 0.0
-
             members_list.append({
                 'u': uname,
                 'p': str(row.get('Password', 'pass')).strip(),
@@ -459,16 +476,15 @@ def load_data():
                 'admin': role_data.get('admin', False),
                 'status': 'Pending' if liq_val == 1 else 'Active',
                 'liq_pending': liq_val,
-                'contribution': init_inv,
-                'value': real_value, # <--- DYNAMICALLY CALCULATED
-                'units_fund': u_f,   # Store for display
-                'units_quant': u_q,  # Store for display
+                'contribution': clean_float(row.get('Initial Investment', 0)),
+                'value': real_value, # <--- UPDATED LIVE
+                'units_fund': u_f,
+                'units_quant': u_q,
                 'contract_text': "TIC MEMBERSHIP..."
             })
     else:
-        # Fallback
         members_list = [{'u': 'admin', 'p': 'pass', 'n': 'Offline', 'r': 'Admin', 'd': 'Board', 'admin': True, 'value': 0}]
-
+    
     members = pd.DataFrame(members_list)
     
     # 3. MESSAGES
@@ -2055,6 +2071,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
