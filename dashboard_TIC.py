@@ -2114,7 +2114,7 @@ def render_fundamental_dashboard(user, portfolio, proposals):
                 if top_weight > 0.30: # 30% Threshold
                     st.warning(f"⚠️ High Concentration: {top_sector} makes up {top_weight:.1%} of the portfolio.")
                 else:
-                    st.success(f"✅ Portfolio is well-diversified. Top sector: {top_sector}
+                    st.success(f"✅ Portfolio is well-diversified. Top sector: {top_sector} ({top_weight:.1%})")
     st.divider()
     
     st.header("🗳️ Active Proposals")
@@ -2582,6 +2582,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
