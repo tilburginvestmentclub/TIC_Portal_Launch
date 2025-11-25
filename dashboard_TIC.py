@@ -354,8 +354,9 @@ def fetch_real_benchmark_data(portfolio_df):
     # Clean up for plotting
     df_chart = df_chart.dropna().reset_index().rename(columns={'index':'Date'})
     return df_chart
+    
     @st.cache_data(ttl=60)
-def load_data():
+    def load_data():
     # --- 1. CONFIGURATION ---
     ROLE_MAP = {
         'ab': {'r': 'Advisory Board', 'd': 'Advisory', 's': 'Board', 'admin': False},
@@ -2084,6 +2085,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
