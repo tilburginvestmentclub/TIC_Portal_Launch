@@ -1941,6 +1941,11 @@ def main():
 
     with st.sidebar:
         st.image(TIC_LOGO, width=150)
+        st.markdown("---")
+        
+        # Profile
+        st.header(user.get('n', 'Unknown Member'))
+        st.caption(f"{user.get('r', 'Member')} | {user.get('email', '')}")
         
         # --- UPDATED FINANCIAL SUMMARY ---
         val = user.get('value', 0)
@@ -2050,6 +2055,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
