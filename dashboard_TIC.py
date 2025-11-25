@@ -354,8 +354,7 @@ def fetch_real_benchmark_data(portfolio_df):
     # Clean up for plotting
     df_chart = df_chart.dropna().reset_index().rename(columns={'index':'Date'})
     return df_chart
-    
-@st.cache_data(ttl=60)
+    @st.cache_data(ttl=60)
 def load_data():
     # --- 1. CONFIGURATION ---
     ROLE_MAP = {
@@ -381,40 +380,54 @@ def load_data():
     f_port = get_data_from_sheet("Fundamentals")
     q_port = get_data_from_sheet("Quant")
     
-    # HELPER: Calculate Real-Time Fund Value
+    # HELPER: Calculate Real-Time Fund Value (Robust Version)
     def calculate_live_total(df):
         total_val = 0.0
+        
         if not df.empty:
-            df.columns = df.columns.astype(str).str.lower()
+            # Normalize headers
+            df.columns = df.columns.astype(str).str.lower().str.strip()
             
-            # 1. Get Tickers (No Cash)
-            tickers = [t for t in df['ticker'].unique() if isinstance(t, str) and "CASH" not in t.upper()]
+            # 1. Identify the Ticker Column
+            ticker_col = None
+            if 'ticker' in df.columns: ticker_col = 'ticker'
+            elif 'model_id' in df.columns: ticker_col = 'model_id'
             
-            # 2. Fetch Live Prices
+            # 2. If no ticker column found, fallback to sheet total
+            if not ticker_col:
+                if 'total' in df.columns:
+                    return clean_float(df['total'].iloc[0]), df
+                return 0.0, df
+
+            # 3. Get Tickers (No Cash)
+            tickers = [t for t in df[ticker_col].unique() if isinstance(t, str) and "CASH" not in t.upper()]
+            
+            # 4. Fetch Live Prices
             prices = fetch_live_prices_with_change(tickers)
             
-            # 3. Sum up (Equity * Price) + Cash
+            # 5. Sum up (Equity * Price) + Cash
             for index, row in df.iterrows():
-                ticker = str(row.get('ticker', ''))
-                units = clean_float(row.get('units', 0))
+                ticker = str(row.get(ticker_col, ''))
+                # Handle varied column names for 'Units'
+                units = 0.0
+                if 'units' in df.columns: units = clean_float(row.get('units', 0))
+                elif 'allocation' in df.columns: units = clean_float(row.get('allocation', 0)) # Fallback if Quant uses allocation as units
+                
+                # Handle varied column names for 'Market Value'
+                sheet_val = 0.0
+                if 'market_value' in df.columns: sheet_val = clean_float(row.get('market_value', 0))
+                elif 'total' in df.columns: sheet_val = clean_float(row.get('total', 0)) # Fallback
                 
                 if "CASH" in ticker.upper():
-                    # Cash: Use value from sheet directly
-                    # (Assuming Market Value column is accurate for Cash)
-                    val = clean_float(row.get('market_value', 0))
+                    val = sheet_val
                 else:
-                    # Equity: Use Live Price * Units
                     live_price = prices.get(ticker, {}).get('price', 0.0)
-                    # Fallback to sheet value if API fails/returns 0
-                    if live_price > 0:
+                    if live_price > 0 and units > 0:
                         val = live_price * units
                     else:
-                        val = clean_float(row.get('market_value', 0))
+                        val = sheet_val # Fallback
                 
                 total_val += val
-                
-                # OPTIONAL: Update the dataframe in-memory so tables show live values
-                # df.at[index, 'market_value'] = val 
                 
         return total_val, df
 
@@ -422,27 +435,33 @@ def load_data():
     f_total, f_port = calculate_live_total(f_port)
     q_total, q_port = calculate_live_total(q_port)
 
-    # Normalize column names for Quant if needed (model_id -> ticker logic)
+    # Standardize Quant DataFrame for Charts (Ensure model_id exists)
     if not q_port.empty:
-        if 'ticker' in q_port.columns: q_port = q_port.rename(columns={'ticker': 'model_id'})
-        if 'target_weight' in q_port.columns: q_port = q_port.rename(columns={'target_weight': 'allocation'})
+        if 'ticker' in q_port.columns: 
+            q_port = q_port.rename(columns={'ticker': 'model_id'})
+        if 'target_weight' in q_port.columns: 
+            q_port = q_port.rename(columns={'target_weight': 'allocation'})
+        
+        # Ensure allocation is numeric
+        if 'allocation' in q_port.columns:
+            q_port['allocation'] = q_port['allocation'].apply(clean_float)
 
     # --- 3. LOAD MEMBERS & CALCULATE NAV ---
     df_mem = get_data_from_sheet("Members")
     members_list = []
     
-    # Calculate Total Units Outstanding (Denominator)
     total_units_fund = 0.0
     total_units_quant = 0.0
     
     if not df_mem.empty:
+        # Clean headers
+        df_mem.columns = df_mem.columns.astype(str).str.strip()
+        
         if 'Units_Fund' in df_mem.columns:
             total_units_fund = pd.to_numeric(df_mem['Units_Fund'], errors='coerce').fillna(0).sum()
         if 'Units_Quant' in df_mem.columns:
             total_units_quant = pd.to_numeric(df_mem['Units_Quant'], errors='coerce').fillna(0).sum()
 
-    # CALCULATE LIVE NAV (Price per Unit)
-    # If Fund = €50k and Units = 500 -> NAV = €100
     nav_fund = f_total / total_units_fund if total_units_fund > 0 else 100.00
     nav_quant = q_total / total_units_quant if total_units_quant > 0 else 100.00
 
@@ -457,12 +476,8 @@ def load_data():
             try: liq_val = int(float(row.get('Liq Pending', 0)))
             except: liq_val = 0
             
-            # Get Individual Units
             u_f = clean_float(row.get('Units_Fund', 0))
             u_q = clean_float(row.get('Units_Quant', 0))
-            
-            # CALCULATE REAL STAKE VALUE
-            # This ensures member value moves exactly with the portfolio
             real_value = (u_f * nav_fund) + (u_q * nav_quant)
             
             members_list.append({
@@ -477,7 +492,7 @@ def load_data():
                 'status': 'Pending' if liq_val == 1 else 'Active',
                 'liq_pending': liq_val,
                 'contribution': clean_float(row.get('Initial Investment', 0)),
-                'value': real_value, # <--- UPDATED LIVE
+                'value': real_value,
                 'units_fund': u_f,
                 'units_quant': u_q,
                 'contract_text': "TIC MEMBERSHIP..."
@@ -486,13 +501,13 @@ def load_data():
         members_list = [{'u': 'admin', 'p': 'pass', 'n': 'Offline', 'r': 'Admin', 'd': 'Board', 'admin': True, 'value': 0}]
     
     members = pd.DataFrame(members_list)
-    
-    # 3. MESSAGES
+
+    # --- 4. MESSAGES ---
     msgs = get_data_from_sheet("Messages")
     if not msgs.empty: msgs.columns = msgs.columns.str.lower()
     messages = msgs.to_dict('records') if not msgs.empty else []
     
-    # 4. EVENTS (CALENDAR)
+    # --- 5. EVENTS ---
     evts = get_data_from_sheet("Events")
     manual_events = []
     if not evts.empty:
@@ -510,23 +525,21 @@ def load_data():
     if not f_port.empty and 'ticker' in f_port.columns:
         tickers = [t for t in f_port['ticker'].dropna().unique() if isinstance(t,str) and "CASH" not in t]
         real_events = fetch_company_events(tickers)
-    
     full_calendar = real_events + manual_events
 
-    # 5. VOTING SYSTEM (PROPOSALS & VOTES)
-    # Load Proposals
+    # --- 6. VOTING ---
     df_props = get_data_from_sheet("Proposals")
     proposals = []
     if not df_props.empty:
         df_props['ID'] = df_props['ID'].astype(str)
         proposals = df_props.to_dict('records')
 
-    # Load Votes
     df_votes = get_data_from_sheet("Votes")
     if not df_votes.empty:
         df_votes['Proposal_ID'] = df_votes['Proposal_ID'].astype(str)
-        
+
     return members, f_port, q_port, messages, proposals, full_calendar, f_total, q_total, df_votes, nav_fund, nav_quant
+    
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
@@ -2071,6 +2084,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
