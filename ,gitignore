@@ -1,0 +1,12 @@
+# Python Caching and Environment
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Streamlit Local Cache
+.streamlit/
+
+# Local Files Not to Share (even though your Excel is needed for now, 
+# if you were running local tests, these logs are useless)
+*.log
