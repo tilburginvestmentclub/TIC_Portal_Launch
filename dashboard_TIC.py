@@ -401,67 +401,57 @@ def fetch_real_benchmark_data(portfolio_df):
 
     return df_chart.dropna().reset_index().rename(columns={'index':'Date'})
     
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=180)
 def load_data():
-    # --- 1. CONFIGURATION ---
-    ROLE_MAP = {
-        'ab': {'r': 'Advisory Board', 'd': 'Advisory', 's': 'Board', 'admin': False},
-        'qr': {'r': 'Quant Researcher', 'd': 'Quant', 's': 'Quant Research', 'admin': False},
-        'hq': {'r': 'Head of Quant', 'd': 'Quant', 's': 'Management', 'admin': True},
-        'qd': {'r': 'Quant Data', 'd': 'Quant', 's': 'Data Team', 'admin': False},
-        'ri': {'r': 'Quant Risk', 'd': 'Quant', 's': 'Risk Team', 'admin': False},
-        'hf': {'r': 'Head of Fundamentals', 'd': 'Fundamental', 's': 'Management', 'admin': True},
-        'ia': {'r': 'Investment Analyst', 'd': 'Fundamental', 's': 'Analyst Team', 'admin': False},
-        'fm': {'r': 'Financial Manager', 'd': 'Board', 's': 'Financial Manager', 'admin': True},
-        'pr': {'r': 'President', 'd': 'Board', 's': 'Management', 'admin': True},
-        'hb': { 'r': "Head of Business Development", 'd': 'Board', 's': 'Business Dev', 'admin': False},
-        'other': {'r': 'Member', 'd': 'General', 's': 'General', 'admin': False},
-    }
-
+    # --- 1. SAFE INITIALIZATION (Defaults) ---
+    # Initialize everything first so we never get UnboundLocalError
+    members = pd.DataFrame()
+    f_port = pd.DataFrame()
+    q_port = pd.DataFrame()
+    messages = []
+    proposals = []
+    full_calendar = []
+    df_votes = pd.DataFrame()
+    att = pd.DataFrame(columns=['Date', 'Member', 'Status', 'Reason'])
+    
+    f_total = 0.0
+    q_total = 0.0
+    nav_fund = 100.00
+    nav_quant = 100.00
+    
+    # --- 2. LOAD PORTFOLIOS ---
+    f_port_raw = get_data_from_sheet("Fundamentals")
+    q_port_raw = get_data_from_sheet("Quant")
+    
+    # Helper: Clean Float
     def clean_float(val):
         if pd.isna(val) or val == '': return 0.0
         try: return float(str(val).replace('€', '').replace(',', '').replace(' ', ''))
         except: return 0.0
 
-    # --- 2. LOAD PORTFOLIOS & CALCULATE LIVE ASSETS ---
-    f_port = get_data_from_sheet("Fundamentals")
-    q_port = get_data_from_sheet("Quant")
-    
-    # HELPER: Calculate Real-Time Fund Value
+    # Helper: Calculate Live Total
     def calculate_live_total(df):
         total_val = 0.0
         if not df.empty:
             df.columns = df.columns.astype(str).str.lower().str.strip()
-            
-            # Identify Ticker Column
             ticker_col = None
             if 'ticker' in df.columns: ticker_col = 'ticker'
             elif 'model_id' in df.columns: ticker_col = 'model_id'
             
-            # Fallback
             if not ticker_col:
-                if 'total' in df.columns: return clean_float(df['total'].iloc[0]), df
-                return 0.0, df
+                return (clean_float(df['total'].iloc[0]) if 'total' in df.columns else 0.0), df
 
-            # Get Tickers
             tickers = [t for t in df[ticker_col].unique() if isinstance(t, str) and "CASH" not in t.upper()]
-            
-            # Fetch Prices
             prices = fetch_live_prices_with_change(tickers)
             
-            # Sum
             for index, row in df.iterrows():
                 ticker = str(row.get(ticker_col, ''))
-                
-                # Get Units (handle varied column names)
                 units = 0.0
                 if 'units' in df.columns: units = clean_float(row.get('units', 0))
                 elif 'allocation' in df.columns: units = clean_float(row.get('allocation', 0))
                 
-                # Get Sheet Value
                 sheet_val = 0.0
                 if 'market_value' in df.columns: sheet_val = clean_float(row.get('market_value', 0))
-                elif 'total' in df.columns: sheet_val = clean_float(row.get('total', 0))
                 
                 if "CASH" in ticker.upper():
                     val = sheet_val
@@ -470,37 +460,48 @@ def load_data():
                     val = (live_price * units) if live_price > 0 and units > 0 else sheet_val
                 
                 total_val += val
-                
         return total_val, df
 
-    f_total, f_port = calculate_live_total(f_port)
-    q_total, q_port = calculate_live_total(q_port)
+    if not f_port_raw.empty:
+        f_total, f_port = calculate_live_total(f_port_raw)
+        # Ensure target_weight is cleaned for charts
+        if 'target_weight' in f_port.columns: 
+            f_port['target_weight'] = f_port['target_weight'].apply(clean_float)
 
-    # Normalize Quant Columns
-    if not q_port.empty:
-        q_port.columns = q_port.columns.astype(str).str.lower()
+    if not q_port_raw.empty:
+        q_total, q_port = calculate_live_total(q_port_raw)
+        # Normalize Quant Columns
         if 'ticker' in q_port.columns: q_port = q_port.rename(columns={'ticker': 'model_id'})
         if 'target_weight' in q_port.columns: q_port = q_port.rename(columns={'target_weight': 'allocation'})
         if 'allocation' in q_port.columns: q_port['allocation'] = q_port['allocation'].apply(clean_float)
 
-    # --- 3. LOAD MEMBERS & CALCULATE NAV ---
+    # --- 3. LOAD MEMBERS & CALC NAV ---
     df_mem = get_data_from_sheet("Members")
     members_list = []
     
-    total_units_fund = 0.0
-    total_units_quant = 0.0
-    
     if not df_mem.empty:
         df_mem.columns = df_mem.columns.astype(str).str.strip()
-        if 'Units_Fund' in df_mem.columns:
-            total_units_fund = pd.to_numeric(df_mem['Units_Fund'], errors='coerce').fillna(0).sum()
-        if 'Units_Quant' in df_mem.columns:
-            total_units_quant = pd.to_numeric(df_mem['Units_Quant'], errors='coerce').fillna(0).sum()
+        
+        total_units_fund = pd.to_numeric(df_mem.get('Units_Fund', 0), errors='coerce').fillna(0).sum()
+        total_units_quant = pd.to_numeric(df_mem.get('Units_Quant', 0), errors='coerce').fillna(0).sum()
 
-    nav_fund = f_total / total_units_fund if total_units_fund > 0 else 100.00
-    nav_quant = q_total / total_units_quant if total_units_quant > 0 else 100.00
+        nav_fund = f_total / total_units_fund if total_units_fund > 0 else 100.00
+        nav_quant = q_total / total_units_quant if total_units_quant > 0 else 100.00
+        
+        ROLE_MAP = {
+            'ab': {'r': 'Advisory Board', 'd': 'Advisory', 's': 'Board', 'admin': False},
+            'qr': {'r': 'Quant Researcher', 'd': 'Quant', 's': 'Quant Research', 'admin': False},
+            'hq': {'r': 'Head of Quant', 'd': 'Quant', 's': 'Management', 'admin': True},
+            'qd': {'r': 'Quant Data', 'd': 'Quant', 's': 'Data Team', 'admin': False},
+            'ri': {'r': 'Quant Risk', 'd': 'Quant', 's': 'Risk Team', 'admin': False},
+            'hf': {'r': 'Head of Fundamentals', 'd': 'Fundamental', 's': 'Management', 'admin': True},
+            'ia': {'r': 'Investment Analyst', 'd': 'Fundamental', 's': 'Analyst Team', 'admin': False},
+            'fm': {'r': 'Financial Manager', 'd': 'Board', 's': 'Financial Manager', 'admin': True},
+            'pr': {'r': 'President', 'd': 'Board', 's': 'Management', 'admin': True},
+            'hb': { 'r': "Head of Business Development", 'd': 'Board', 's': 'Business Dev', 'admin': False},
+            'other': {'r': 'Member', 'd': 'General', 's': 'General', 'admin': False},
+        }
 
-    if not df_mem.empty:
         for _, row in df_mem.iterrows():
             role_code = str(row.get('Role', 'other')).strip().lower()
             role_data = ROLE_MAP.get(role_code, {'r': 'Member', 'd': 'General', 's': 'General', 'admin': False})
@@ -513,35 +514,26 @@ def load_data():
             
             u_f = clean_float(row.get('Units_Fund', 0))
             u_q = clean_float(row.get('Units_Quant', 0))
-            
             real_value = (u_f * nav_fund) + (u_q * nav_quant)
             
             members_list.append({
-                'u': uname,
-                'p': str(row.get('Password', 'pass')).strip(),
-                'n': name,
-                'email': email,
-                'r': role_data['r'],
-                'd': role_data['d'],
-                's': role_data['s'],
-                'admin': role_data.get('admin', False),
-                'status': 'Pending' if liq_val == 1 else 'Active',
-                'liq_pending': liq_val,
+                'u': uname, 'p': str(row.get('Password', 'pass')).strip(), 'n': name, 'email': email,
+                'r': role_data['r'], 'd': role_data['d'], 's': role_data['s'], 'admin': role_data.get('admin', False),
+                'status': 'Pending' if liq_val == 1 else 'Active', 'liq_pending': liq_val,
                 'contribution': clean_float(row.get('Initial Investment', 0)),
-                'value': real_value,
-                'units_fund': u_f,
-                'units_quant': u_q,
+                'value': real_value, 'units_fund': u_f, 'units_quant': u_q,
                 'contract_text': "TIC MEMBERSHIP..."
             })
+        members = pd.DataFrame(members_list)
     else:
-        members_list = [{'u': 'admin', 'p': 'pass', 'n': 'Offline', 'r': 'Admin', 'd': 'Board', 'admin': True, 'value': 0}]
-    
-    members = pd.DataFrame(members_list)
+        # Fallback Admin
+        members = pd.DataFrame([{'u': 'admin', 'p': 'pass', 'n': 'Offline Admin', 'r': 'Admin', 'd': 'Board', 'admin': True, 'value': 0}])
 
     # --- 4. MESSAGES ---
     msgs = get_data_from_sheet("Messages")
-    if not msgs.empty: msgs.columns = msgs.columns.str.lower()
-    messages = msgs.to_dict('records') if not msgs.empty else []
+    if not msgs.empty: 
+        msgs.columns = msgs.columns.str.lower()
+        messages = msgs.to_dict('records')
     
     # --- 5. EVENTS ---
     evts = get_data_from_sheet("Events")
@@ -550,22 +542,22 @@ def load_data():
         evts['Date'] = pd.to_datetime(evts['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
         for _, row in evts.iterrows():
             manual_events.append({
-                'title': str(row.get('Title','')),
-                'ticker': str(row.get('Ticker','')),
-                'date': str(row.get('Date','')),
-                'type': str(row.get('Type','')).lower(),
+                'title': str(row.get('Title','')), 'ticker': str(row.get('Ticker','')),
+                'date': str(row.get('Date','')), 'type': str(row.get('Type','')).lower(),
                 'audience': str(row.get('Audience','all'))
             })
 
     real_events = []
     if not f_port.empty and 'ticker' in f_port.columns:
-        tickers = [t for t in f_port['ticker'].dropna().unique() if isinstance(t,str) and "CASH" not in t.upper()]
-        real_events = fetch_company_events(tickers)
+        # Safety: Check column exists before access
+        valid_tickers = [t for t in f_port['ticker'].dropna().unique() if isinstance(t,str) and "CASH" not in t]
+        if valid_tickers:
+            real_events = fetch_company_events(valid_tickers)
+    
     full_calendar = real_events + manual_events
 
     # --- 6. VOTING ---
     df_props = get_data_from_sheet("Proposals")
-    proposals = []
     if not df_props.empty:
         df_props['ID'] = df_props['ID'].astype(str)
         proposals = df_props.to_dict('records')
@@ -573,17 +565,15 @@ def load_data():
     df_votes = get_data_from_sheet("Votes")
     if not df_votes.empty:
         df_votes['Proposal_ID'] = df_votes['Proposal_ID'].astype(str)
-        
-    # --- 7. ATTENDANCE ---
-    att = get_data_from_sheet("Attendance")
-    if not att.empty:
-        if 'Date' in att.columns:
-            att['Date'] = pd.to_datetime(att['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-    else:
-        att = pd.DataFrame(columns=['Date', 'Member', 'Status', 'Reason'])
 
-    return members, f_port, q_port, messages, proposals, full_calendar, f_total, q_total, df_votes, nav_f, nav_q, att
-    
+    # --- 7. ATTENDANCE ---
+    att_raw = get_data_from_sheet("Attendance")
+    if not att_raw.empty:
+        if 'Date' in att_raw.columns:
+            att_raw['Date'] = pd.to_datetime(att_raw['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+        att = att_raw
+
+    return members, f_port, q_port, messages, proposals, full_calendar, f_total, q_total, df_votes, nav_fund, nav_quant, att    
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
@@ -2492,6 +2482,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
