@@ -1,0 +1,8 @@
+streamlit
+pandas
+plotly
+yfinance
+fpdf
+numpy
+feedparser
+openpyxl
