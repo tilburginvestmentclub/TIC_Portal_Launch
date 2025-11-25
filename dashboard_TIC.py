@@ -1561,6 +1561,44 @@ def render_admin_panel(user, members_df, f_port, q_port, f_total, q_total, propo
                 file_name=fname,
                 mime="application/pdf"
             )
+        st.divider()
+        st.subheader("💾 System Backup")
+        st.caption("Download raw database snapshots for offline storage.")
+    
+        c_b1, c_b2, c_b3, c_b4 = st.columns(4)
+    
+        # 1. Members Backup
+        c_b1.download_button(
+            "👥 Members",
+            members_df.to_csv(index=False).encode('utf-8'),
+            f"Backup_Members_{datetime.now().strftime('%Y%m%d')}.csv",
+            "text/csv"
+        )
+    
+        # 2. Votes Backup
+        if not votes_df.empty:
+            c_b2.download_button(
+                "🗳️ Votes",
+                votes_df.to_csv(index=False).encode('utf-8'),
+                f"Backup_Votes_{datetime.now().strftime('%Y%m%d')}.csv",
+                "text/csv"
+            )
+        
+        # 3. Fundamental Portfolio Backup
+        c_b3.download_button(
+            "📈 Fundamentals",
+            f_port.to_csv(index=False).encode('utf-8'),
+            f"Backup_Fund_{datetime.now().strftime('%Y%m%d')}.csv",
+            "text/csv"
+        )
+
+        # 4. Quant Portfolio Backup
+        c_b4.download_button(
+            "🤖 Quant",
+            q_port.to_csv(index=False).encode('utf-8'),
+            f"Backup_Quant_{datetime.now().strftime('%Y%m%d')}.csv",
+            "text/csv"
+        )    
         pass
     
     # --- TAB 4: ATTENDANCE ---
@@ -1757,7 +1795,7 @@ def render_ticker_tape(data_dict):
 def render_offboarding(user):
     st.title("⚙️ Settings & Financials")
     
-    t_invest, t_status = st.tabs(["🟢 Capital Injection", "🔴 Exit / Liquidation"])
+    t_invest, t_status, t_sec = st.tabs(["🟢 Capital Injection", "🔴 Exit / Liquidation", "🔐 Security"])
     
     # 1. Get User Financials
     current_status = user.get('status', 'Active')
@@ -1849,6 +1887,36 @@ def render_offboarding(user):
                 else:
                     st.error("Cancellation failed.")
                 st.rerun()
+
+    # ==========================================
+    # TAB 3: SECURITY (CHANGE PASSWORD)
+    # ==========================================
+    with t_sec:
+        st.subheader("Update Credentials")
+        
+        with st.form("change_pass_form"):
+            current_p = st.text_input("Current Password", type="password")
+            new_p1 = st.text_input("New Password", type="password")
+            new_p2 = st.text_input("Confirm New Password", type="password")
+            
+            if st.form_submit_button("Update Password"):
+                # Validation Logic
+                if current_p != user['p']:
+                    st.error("❌ Incorrect current password.")
+                elif new_p1 != new_p2:
+                    st.error("❌ New passwords do not match.")
+                elif len(new_p1) < 4:
+                    st.warning("⚠️ Password is too short.")
+                else:
+                    # Save to Google Sheet
+                    # This relies on your existing update_member_field_in_gsheet helper
+                    if update_member_field_in_gsheet(user['u'], "Password", new_p1):
+                        st.success("✅ Password updated! Please log in again.")
+                        # Clear session to force re-login
+                        st.session_state.clear()
+                        # No rerun here, let them see the success message or click logout manually
+                    else:
+                        st.error("❌ Update failed. Database error.")
             
 def render_simulation(user):
     st.title("🎮 Paper Trading Simulation")
@@ -2582,6 +2650,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
