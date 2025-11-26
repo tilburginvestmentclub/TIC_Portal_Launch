@@ -1151,7 +1151,124 @@ def render_leaderboard(user, members_df):
         hide_index=True,
         height=400
     )
+def render_stock_research():
+    st.title("🔎 Equity Research Terminal")
+    st.caption("DES (Description) // FA (Financial Analysis) // RV (Relative Valuation)")
+
+    # Input Bar
+    col_input, col_status = st.columns([1, 3])
+    with col_input:
+        ticker = st.text_input("Enter Ticker", value="NVDA").upper()
     
+    if not ticker: return
+
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        
+        # Header Data
+        st.markdown(f"""
+        ### {info.get('shortName', ticker)} ({ticker})
+        **Sector:** {info.get('sector', 'N/A')} | **Industry:** {info.get('industry', 'N/A')}  
+        **Price:** {info.get('currentPrice', 'N/A')} | **Market Cap:** {info.get('marketCap', 0)/1e9:.2f}B | **Beta:** {info.get('beta', 'N/A')}
+        """)
+        
+        t_des, t_fa, t_rv = st.tabs(["📄 DES (Profile)", "📊 FA (Financials)", "⚖️ RV (Peers)"])
+
+        # --- TAB 1: DESCRIPTION ---
+        with t_des:
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                st.subheader("Business Summary")
+                st.write(info.get('longBusinessSummary', 'No description available.'))
+            with c2:
+                st.subheader("Key Ratios")
+                ratios = {
+                    "P/E (Trailing)": info.get('trailingPE'),
+                    "P/E (Forward)": info.get('forwardPE'),
+                    "PEG Ratio": info.get('pegRatio'),
+                    "Price/Book": info.get('priceToBook'),
+                    "EV/EBITDA": info.get('enterpriseToEbitda'),
+                    "Profit Margin": f"{info.get('profitMargins', 0)*100:.2f}%",
+                    "ROA": f"{info.get('returnOnAssets', 0)*100:.2f}%",
+                    "ROE": f"{info.get('returnOnEquity', 0)*100:.2f}%"
+                }
+                df_r = pd.DataFrame(list(ratios.items()), columns=['Metric', 'Value'])
+                st.dataframe(df_r, hide_index=True, use_container_width=True)
+
+        # --- TAB 2: FINANCIAL ANALYSIS ---
+        with t_fa:
+            st.subheader("Financial Statements (Annual)")
+            
+            # Fetch financials
+            inc = stock.financials
+            bal = stock.balance_sheet
+            cash = stock.cashflow
+
+            # Transpose for readability (Years as rows)
+            if not inc.empty:
+                st.markdown("**Income Statement**")
+                st.dataframe(inc.T.iloc[:, :8], use_container_width=True) # Show top 8 rows
+            
+            if not bal.empty:
+                st.markdown("**Balance Sheet**")
+                st.dataframe(bal.T.iloc[:, :8], use_container_width=True)
+
+        # --- TAB 3: RELATIVE VALUATION ---
+        with t_rv:
+            st.subheader("Peer Comparison")
+            st.caption("Comparing against major peers in the same sector (Automated Fetch).")
+            
+            # 1. Define Peers (Simple logic or hardcoded for demo)
+            # In a full app, you'd scrape a peer list. Here we use a static list based on sector or manual input.
+            sector = info.get('sector', '')
+            peers = []
+            if "Technology" in sector: peers = ['MSFT', 'AAPL', 'NVDA', 'AMD', 'INTC']
+            elif "Financial" in sector: peers = ['JPM', 'BAC', 'GS', 'MS', 'C']
+            else: peers = [ticker, 'SPY'] # Fallback
+            
+            if ticker not in peers: peers.insert(0, ticker)
+
+            # 2. Bulk Fetch
+            peer_data = []
+            for p in peers:
+                try:
+                    i = yf.Ticker(p).info
+                    peer_data.append({
+                        "Ticker": p,
+                        "Price": i.get('currentPrice'),
+                        "P/E": i.get('trailingPE'),
+                        "Fwd P/E": i.get('forwardPE'),
+                        "EV/EBITDA": i.get('enterpriseToEbitda'),
+                        "P/B": i.get('priceToBook'),
+                        "Margins": i.get('profitMargins')
+                    })
+                except: continue
+            
+            df_peers = pd.DataFrame(peer_data).set_index("Ticker")
+            
+            # 3. Highlight Current Ticker
+            st.dataframe(
+                df_peers.style.highlight_max(axis=0, color='#1e3d1e').format("{:.2f}"),
+                use_container_width=True
+            )
+            
+            # 4. Scatter Plot (P/E vs Growth)
+            if not df_peers.empty:
+                fig = px.scatter(
+                    df_peers.reset_index(), 
+                    x='P/E', y='EV/EBITDA', 
+                    text='Ticker', 
+                    size='Price',
+                    title="Relative Valuation Map",
+                    color_discrete_sequence=['#D4AF37']
+                )
+                fig.update_traces(textposition='top center')
+                st.plotly_chart(fig, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Could not load data for {ticker}. Error: {e}")
+        
 def render_valuation_sandbox():
     st.title("🧮 Valuation Sandbox (DCF)")
     st.caption("DISCOUNTED CASH FLOW MODEL // INTRINSIC VALUE CALCULATOR")
@@ -1172,57 +1289,75 @@ def render_valuation_sandbox():
             wacc = st.slider("WACC %", 0.05, 0.15, 0.09, 0.005)
             term_growth = st.slider("Terminal Growth %", 0.01, 0.05, 0.025, 0.005)
 
-    # Calculation Logic
-    future_fcf = []
-    discount_factors = []
-    
-    # Years 1-5
-    for i in range(1, 6):
-        val = fcf * ((1 + growth_1_5) ** i)
-        future_fcf.append(val)
-        discount_factors.append((1 + wacc) ** i)
+    # --- CORE CALCULATION FUNCTION ---
+    def calculate_dcf(w_in, g_in):
+        # Years 1-5
+        future_fcf = []
+        discount_factors = []
+        for i in range(1, 6):
+            future_fcf.append(fcf * ((1 + growth_1_5) ** i))
+            discount_factors.append((1 + w_in) ** i)
         
-    # Years 6-10
-    for i in range(1, 6):
-        val = future_fcf[-1] * ((1 + growth_6_10) ** i)
-        future_fcf.append(val)
-        discount_factors.append((1 + wacc) ** (5 + i))
+        # Years 6-10
+        for i in range(1, 6):
+            future_fcf.append(future_fcf[-1] * ((1 + growth_6_10) ** i))
+            discount_factors.append((1 + w_in) ** (5 + i))
+            
+        # Terminal Value
+        tv = (future_fcf[-1] * (1 + g_in)) / (w_in - g_in)
+        pv_tv = tv / ((1 + w_in) ** 10)
         
-    # Terminal Value
-    tv = (future_fcf[-1] * (1 + term_growth)) / (wacc - term_growth)
-    pv_tv = tv / ((1 + wacc) ** 10)
-    
-    pv_fcf = sum([f/d for f, d in zip(future_fcf, discount_factors)])
-    enterprise_value = pv_fcf + pv_tv
-    equity_value = enterprise_value + cash
-    share_price = equity_value / shares
+        pv_fcf = sum([f/d for f, d in zip(future_fcf, discount_factors)])
+        
+        equity_val = pv_fcf + pv_tv + cash
+        return equity_val / shares, pv_fcf, pv_tv
+
+    # Base Case
+    share_price, pv_fcf, pv_tv = calculate_dcf(wacc, term_growth)
 
     with c_viz:
         st.subheader(f"IMPLIED VALUE: ${share_price:.2f}")
         
-        # Waterfall Chart - Styled for Dark Mode
+        # 1. Waterfall Chart
         fig = px.bar(
             x=['PV FCF (10yr)', 'PV Term Val', 'Net Cash'],
             y=[pv_fcf, pv_tv, cash],
             title=f"ENTERPRISE VALUE BRIDGE: {ticker.upper()}",
             labels={'y':'Value ($B)', 'x':''}
         )
-        # Bloomberg Orange, Dark Gray, Green
         fig.update_traces(marker_color=['#FF9900', '#444444', '#00FF00']) 
-        
-        fig.update_layout(
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='rgba(0,0,0,0)',
-            font=dict(color='#E0E0E0', family="Courier New"),
-            title_font=dict(size=20)
-        )
         st.plotly_chart(fig, use_container_width=True)
         
         st.divider()
-        st.markdown("#### SENSITIVITY CHECK")
-        st.write(f"At **{(wacc*100):.1f}% WACC** and **{(term_growth*100):.1f}% Terminal Growth**, the fair value is **${share_price:.2f}**.")
-        st.latex(r"IV = \frac{\sum PV(FCF) + PV(TV) + Cash}{Shares}")
-
+        
+        # 2. SENSITIVITY TABLE (HEATMAP)
+        st.markdown("#### 🌡️ Sensitivity Analysis (Price vs Assumptions)")
+        
+        # Create Ranges
+        wacc_range = np.linspace(wacc - 0.01, wacc + 0.01, 5) # +/- 1%
+        term_range = np.linspace(term_growth - 0.005, term_growth + 0.005, 5) # +/- 0.5%
+        
+        # Build Matrix
+        z_values = []
+        for w in wacc_range:
+            row = []
+            for g in term_range:
+                p, _, _ = calculate_dcf(w, g)
+                row.append(round(p, 2))
+            z_values.append(row)
+            
+        # Plot Heatmap
+        fig_heat = px.imshow(
+            z_values,
+            labels=dict(x="Terminal Growth", y="WACC", color="Share Price"),
+            x=[f"{x:.1%}" for x in term_range],
+            y=[f"{y:.1%}" for y in wacc_range],
+            text_auto=True,
+            aspect="auto",
+            color_continuous_scale="RdYlGn"
+        )
+        fig_heat.update_layout(title="Implied Share Price Matrix")
+        st.plotly_chart(fig_heat, use_container_width=True)
 def render_calendar_view(user, all_events):
     st.title("🗓️ Smart Calendar")
     st.caption(f"Showing events for: {user['n']} ({user['d']} Dept)")
@@ -2108,17 +2243,12 @@ def render_risk_macro_dashboard(f_port, q_port):
     st.title("⚠️ Risk & Macro Observatory")
     
     # 1. Define Tabs (Same as before)
-    tabs = ["Correlation Matrix", "Macro Indicators", "Market News"]
+    tabs = ["Correlation Matrix","Value at Risk (VaR)","Macro Indicators", "Market News"]
     
     # 2. State Logic (Use session state to preserve the tab choice)
-    if 'risk_active_tab' not in st.session_state:
-        st.session_state['risk_active_tab'] = tabs[0]
-    
-    try:
-        curr_index = tabs.index(st.session_state['risk_active_tab'])
-    except:
-        curr_index = 0
-        
+    if 'risk_active_tab' not in st.session_state: st.session_state['risk_active_tab'] = tabs[0]
+    try: curr_index = tabs.index(st.session_state['risk_active_tab'])
+    except: curr_index = 0
     active_tab = st.radio("Risk View", tabs, index=curr_index, horizontal=True, label_visibility="collapsed")
     st.session_state['risk_active_tab'] = active_tab
     st.divider()
@@ -2178,6 +2308,85 @@ def render_risk_macro_dashboard(f_port, q_port):
                 else: st.info("Not enough assets to calculate correlation (Need 2+).")
             else: st.warning("Could not identify Ticker column.")
         else: st.warning("Portfolio is empty.")
+    
+    elif active_tab == "Value at Risk (VaR)":
+        st.subheader("🛡️ Portfolio Historical VaR (95%)")
+        st.caption("Estimating potential loss based on the last 1 year of historical data for current holdings.")
+        
+        # 1. Combine Portfolios for Calculation
+        combined_tickers = []
+        weights = {}
+        total_aum = 0
+        
+        # Process Fundamental
+        if not f_port.empty and 'ticker' in f_port.columns:
+            for _, row in f_port.iterrows():
+                t = str(row.get('ticker'))
+                v = float(row.get('market_value', 0))
+                if "CASH" not in t.upper() and v > 0:
+                    combined_tickers.append(t)
+                    weights[t] = weights.get(t, 0) + v
+                    total_aum += v
+                    
+        # Process Quant
+        if not q_port.empty:
+            # Check if using 'model_id' or 'ticker'
+            col = 'model_id' if 'model_id' in q_port.columns else 'ticker'
+            for _, row in q_port.iterrows():
+                t = str(row.get(col, ''))
+                v = float(row.get('market_value', 0))
+                if t and "CASH" not in t.upper() and v > 0:
+                    combined_tickers.append(t)
+                    weights[t] = weights.get(t, 0) + v
+                    total_aum += v
+
+        # 2. Fetch Data
+        if combined_tickers and total_aum > 0:
+            unique_tickers = list(set(combined_tickers))
+            with st.spinner("Calculating Historical VaR..."):
+                try:
+                    # Download history
+                    data = yf.download(unique_tickers, period="1y", progress=False)['Close']
+                    returns = data.pct_change().dropna()
+                    
+                    # Calculate Portfolio Returns (Weighted)
+                    # Create weight vector aligned with columns
+                    w_vector = [weights.get(t, 0)/total_aum for t in returns.columns]
+                    
+                    # Dot product: Matrix of returns * Weights
+                    port_returns = returns.dot(w_vector)
+                    
+                    # 3. Calculate Stats
+                    confidence_level = 0.95
+                    var_95 = np.percentile(port_returns, (1 - confidence_level) * 100)
+                    cvar_95 = port_returns[port_returns <= var_95].mean()
+                    
+                    # Convert to currency
+                    var_val = total_aum * var_95
+                    cvar_val = total_aum * cvar_95
+                    
+                    # 4. Display Metrics
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Daily VaR (95%)", f"€{var_val:,.2f}", f"{var_95*100:.2f}%")
+                    c2.metric("Daily CVaR (Expected Tail Loss)", f"€{cvar_val:,.2f}", f"{cvar_95*100:.2f}%")
+                    c3.metric("Calculation Base", f"{len(unique_tickers)} Assets", "1 Year History")
+                    
+                    # 5. Visualization (Histogram)
+                    fig_hist = px.histogram(
+                        port_returns, 
+                        nbins=50, 
+                        title="Distribution of Daily Portfolio Returns",
+                        labels={'value': 'Daily Return'},
+                        color_discrete_sequence=['#444444']
+                    )
+                    # Add VaR Line
+                    fig_hist.add_vline(x=var_95, line_width=3, line_dash="dash", line_color="#FF4444", annotation_text="VaR 95%")
+                    st.plotly_chart(fig_hist, use_container_width=True)
+                    
+                except Exception as e:
+                    st.error(f"VaR Calculation failed: {e}")
+        else:
+            st.warning("No active assets found in portfolio to calculate VaR.")
     
     # --- TAB 2: MACRO INDICATORS ---
     elif active_tab == "Macro Indicators":
@@ -2724,8 +2933,10 @@ def main():
             menu.insert(0, "Dashboard")
             
         # Fundamental Specific Tools
-        if user['d'] == 'Fundamental':
+        if user['d'] in ['Fundamental', 'Board', 'Advisory'] or user.get('r') == 'Guest'
             menu.insert(3, "Valuation Tool")
+
+        menu.insert(2, "Stock Research")
 
         # Only show Admin Panel if user has admin=True
         if user.get('admin', False):
@@ -2803,7 +3014,8 @@ def main():
             render_voting_section(user, props, df_votes, "Fundamental")
             
     elif "Risk & Macro" in nav: render_risk_macro_dashboard(f_port, q_port)
-    elif nav == "Valuation Tool": render_valuation_sandbox() 
+    elif nav == "Valuation Tool": render_valuation_sandbox()
+    elif nav == "Stock Research": render_stock_research()
     elif nav == "Simulation": 
         t_sim, t_lead = st.tabs(["🎮 Trade", "🏆 Leaderboard"])
         with t_sim: render_simulation(user)
@@ -2851,6 +3063,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
