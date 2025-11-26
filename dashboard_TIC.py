@@ -591,23 +591,43 @@ def load_data():
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
-@st.cache_data(ttl=3600) # Cache for 1 hour
+@st.cache_data(ttl=3600)
 def fetch_stock_profile(ticker):
-    """Fetches the heavy 'info' dictionary with caching."""
-    try:
-        return yf.Ticker(ticker).info
-    except Exception:
-        return {}
+    """Fetches the heavy 'info' dictionary with caching and retry logic."""
+    # Try up to 3 times
+    for attempt in range(3):
+        try:
+            data = yf.Ticker(ticker).info
+            # Basic validation: ensure we got something meaningful
+            if data and len(data) > 1: 
+                return data
+        except Exception:
+            # If it fails, wait a bit and try again (Exponential Backoff)
+            time.sleep(1 * (attempt + 1)) 
+            continue
+            
+    return {} # Return empty if all 3 attempts fail
 
 @st.cache_data(ttl=3600)
 def fetch_stock_financials(ticker):
-    """Fetches dataframes for statements."""
-    try:
-        stock = yf.Ticker(ticker)
-        # Force fetch to ensure we catch errors here
-        return stock.financials, stock.balance_sheet, stock.cashflow
-    except Exception:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    """Fetches dataframes for statements with retry logic."""
+    for attempt in range(3):
+        try:
+            stock = yf.Ticker(ticker)
+            # Force fetch to ensure we catch errors here
+            inc = stock.financials
+            bal = stock.balance_sheet
+            cash = stock.cashflow
+            
+            # If we get at least one dataframe, return success
+            if not inc.empty or not bal.empty:
+                return inc, bal, cash
+                
+        except Exception:
+            time.sleep(1 * (attempt + 1))
+            continue
+            
+    return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 @st.cache_data(ttl=3600*12) # Cache for 12 hours
 def fetch_peer_data_safe(main_ticker, sector):
@@ -3099,6 +3119,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
