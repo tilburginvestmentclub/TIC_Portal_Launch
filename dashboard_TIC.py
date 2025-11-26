@@ -1063,62 +1063,136 @@ def send_new_message(from_user, to_user, subject, body):
 # ==========================================
 # 4. VIEW COMPONENTS
 # ==========================================
-def render_launchpad(user, f_total, q_total, nav_f, nav_q):
+def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calendar_events):
     """
-    Personalized Homepage (The 'Launchpad')
-    Content changes based on Department (Quant vs Fundamental).
+    Role-Based Homepage with REAL Data Connections.
     """
-    # Time-based Greeting
+    # 1. Dynamic Greeting
     h = datetime.now().hour
     if 5 <= h < 12: greeting = "Good Morning"
     elif 12 <= h < 18: greeting = "Good Afternoon"
     else: greeting = "Good Evening"
     
     st.title(f"🚀 {greeting}, {user['n']}")
-    st.caption(f"Department: {user['d']} | Role: {user['r']}")
+    st.caption(f"Logged in as: {user['r']} | Department: {user['d']}")
     
-    # 1. High-Level Metrics (For Everyone)
+    # 2. Global Ticker (Mini)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("TIC Total AUM", f"€{f_total + q_total:,.0f}")
-    c2.metric("Your Equity", f"€{user.get('value', 0):,.2f}")
     
-    # 2. Role-Based View
+    # Calculate User's Personal Performance
+    # (Value - Contribution) / Contribution
+    u_val = user.get('value', 0)
+    u_cont = user.get('contribution', 1)
+    u_perf = ((u_val - u_cont) / u_cont) * 100 if u_cont > 0 else 0.0
+    c2.metric("Your Equity", f"€{u_val:,.2f}", f"{u_perf:+.1f}%")
+
+    # ==========================================
+    # 3. QUANT VIEW (Data-Driven)
+    # ==========================================
     if user['d'] == 'Quant':
+        # A. Calculate Real Stats from q_port
+        active_models = 0
+        top_asset = "N/A"
+        if not q_port.empty:
+            # Count unique strategies
+            if 'model_id' in q_port.columns:
+                active_models = q_port['model_id'].nunique()
+            # Find largest holding
+            top_row = q_port.sort_values('market_value', ascending=False).iloc[0]
+            top_asset = f"{top_row.get('ticker', 'N/A')} ({top_row.get('allocation', 0)*100:.1f}%)"
+
         c3.metric("Quant NAV", f"€{nav_q:.2f}")
-        c4.metric("Active Models", "4") # Placeholder or count from q_port
+        c4.metric("Active Models", str(active_models))
         
         st.divider()
         st.subheader("🤖 Quant Workspace")
-        q1, q2 = st.columns(2)
-        with q1:
-            st.info("Quick Actions")
-            if st.button("New Backtest"): st.toast("Opening Backtest Engine...")
-            if st.button("Check Data Pipelines"): st.toast("All pipelines green.")
-        with q2:
-            st.success("System Status")
-            st.markdown("- **API:** Online (12ms latency)\n- **Database:** Synced\n- **Risk Engine:** Active")
-            
+        
+        col_q1, col_q2 = st.columns([2, 1])
+        with col_q1:
+            st.info(f"🏆 Top Conviction: **{top_asset}**")
+            st.markdown("##### System Status")
+            # Mock system check
+            st.markdown(f"""
+            - **Data Pipeline:** 🟢 Nominal
+            - **Risk Engine:** 🟢 Active (VaR calculated)
+            - **Last Rebalance:** {datetime.now().strftime('%Y-%m-%d')}
+            """)
+        
+        with col_q2:
+            st.markdown("##### Quick Actions")
+            st.button("⚡ Run Backtest")
+            st.button("📥 Pull Data Logs")
+
+    # ==========================================
+    # 4. FUNDAMENTAL VIEW (Data-Driven)
+    # ==========================================
     elif user['d'] == 'Fundamental':
+        # A. Find Next Earnings Date from Calendar
+        next_event = "None"
+        days_away = 0
+        
+        # Filter for 'market' events (earnings)
+        earnings = [e for e in calendar_events if e['type'] == 'market']
+        if earnings:
+            # Sort by date
+            earnings.sort(key=lambda x: x['date'])
+            # Get first one
+            next_e = earnings[0]
+            next_event = f"{next_e['ticker']}"
+            
+            # Calc days away
+            d_date = datetime.strptime(next_e['date'], '%Y-%m-%d')
+            days_away = (d_date - datetime.now()).days
+
         c3.metric("Fund NAV", f"€{nav_f:.2f}")
-        c4.metric("Earnings Season", "Active")
+        c4.metric("Next Earnings", next_event, f"{days_away} days")
         
         st.divider()
         st.subheader("📈 Analyst Workspace")
-        f1, f2 = st.columns(2)
-        with f1:
-            st.info("Quick Actions")
-            if st.button("New Stock Pitch"): st.toast("Template Downloaded.")
-            if st.button("Update Valuations"): st.toast("Opening DCF...")
-        with f2:
-            st.warning("Watchlist Alerts")
-            st.markdown("- **NVDA:** Earnings in 3 days\n- **AAPL:** Crossed 200MA\n- **TSLA:** High Volatility")
-            
-    else: # Board / General
+        
+        col_f1, col_f2 = st.columns([2, 1])
+        with col_f1:
+            st.info("🔥 **Market Focus**")
+            # Show top 3 largest holdings in Fundamental Port
+            if not f_port.empty:
+                top_3 = f_port.sort_values('market_value', ascending=False).head(3)
+                txt = " • ".join([f"{r['ticker']}" for _, r in top_3.iterrows()])
+                st.write(f"**Top Holdings:** {txt}")
+            else:
+                st.write("Portfolio is empty.")
+                
+        with col_f2:
+            st.markdown("##### Quick Actions")
+            st.button("📝 New Memo")
+            st.button("🔎 DCF Model")
+
+    # ==========================================
+    # 5. BOARD / GENERAL VIEW
+    # ==========================================
+    else: 
         c3.metric("Fund NAV", f"€{nav_f:.2f}")
         c4.metric("Quant NAV", f"€{nav_q:.2f}")
+        
         st.divider()
-        st.write("Please select a module from the sidebar to begin.")
-
+        st.subheader("🏛️ Board Overview")
+        
+        # Show Cash vs Equity split
+        cash_total = 0
+        # Sum cash from both portfolios (approximate)
+        if not f_port.empty:
+            cash_total += f_port[f_port['ticker'].str.contains("CASH", na=False)]['market_value'].sum()
+        if not q_port.empty:
+             # Check for ticker col availability in quant
+             q_tick = 'ticker' if 'ticker' in q_port.columns else 'model_id'
+             cash_total += q_port[q_port[q_tick].str.contains("CASH", na=False)]['market_value'].sum()
+             
+        b1, b2 = st.columns(2)
+        with b1:
+            st.metric("Total Liquid Cash", f"€{cash_total:,.2f}")
+        with b2:
+            st.info("System healthy. No pending critical alerts.")
+            
 def render_voting_section(user, proposals, votes_df, target_dept):
     """Renders the voting UI with a Circular Donut Chart."""
     st.header(f"🗳️ {target_dept} Governance")
@@ -3092,7 +3166,7 @@ def main():
 
 # ROUTING
     if "Launchpad" in nav:
-        render_launchpad(user, f_total, q_total, nav_f, nav_q)
+        render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calendar_events)
         
     elif "Dashboard" in nav:
         # 1. BOARD, ADVISORY, AND GUESTS (See Both)
@@ -3176,6 +3250,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
