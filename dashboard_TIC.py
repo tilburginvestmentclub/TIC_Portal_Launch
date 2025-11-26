@@ -2386,7 +2386,6 @@ def render_risk_macro_dashboard(f_port, q_port):
                     
         # Process Quant
         if not q_port.empty:
-            # Check if using 'model_id' or 'ticker'
             col = 'model_id' if 'model_id' in q_port.columns else 'ticker'
             for _, row in q_port.iterrows():
                 t = str(row.get(col, ''))
@@ -2396,21 +2395,49 @@ def render_risk_macro_dashboard(f_port, q_port):
                     weights[t] = weights.get(t, 0) + v
                     total_aum += v
 
-        # 2. Fetch Data
+        # 2. Fetch Data with Safety Checks
         if combined_tickers and total_aum > 0:
             unique_tickers = list(set(combined_tickers))
             with st.spinner("Calculating Historical VaR..."):
                 try:
                     # Download history
-                    data = yf.download(unique_tickers, period="1y", progress=False)['Close']
+                    data_raw = yf.download(unique_tickers, period="1y", progress=False)
+                    
+                    # Check if data is empty or corrupted
+                    if data_raw.empty:
+                        st.warning("⚠️ Could not fetch historical data. API might be rate-limited.")
+                        return
+
+                    # Handle single ticker vs multiple tickers structure
+                    if len(unique_tickers) == 1:
+                        data = data_raw['Close'].to_frame() if 'Close' in data_raw else pd.DataFrame()
+                        data.columns = unique_tickers # Rename col to ticker
+                    else:
+                        data = data_raw['Close']
+                        
+                    if data.empty:
+                        st.warning("⚠️ No 'Close' price data available.")
+                        return
+
+                    # Calculate Returns
                     returns = data.pct_change().dropna()
                     
+                    if returns.empty:
+                        st.warning("⚠️ Not enough historical data points to calculate VaR.")
+                        return
+
                     # Calculate Portfolio Returns (Weighted)
-                    # Create weight vector aligned with columns
-                    w_vector = [weights.get(t, 0)/total_aum for t in returns.columns]
+                    # Filter weights to only include tickers we actually got data for
+                    valid_tickers = [t for t in returns.columns if t in weights]
+                    
+                    if not valid_tickers:
+                        st.warning("⚠️ No matching data found for your tickers.")
+                        return
+
+                    w_vector = [weights[t]/total_aum for t in valid_tickers]
                     
                     # Dot product: Matrix of returns * Weights
-                    port_returns = returns.dot(w_vector)
+                    port_returns = returns[valid_tickers].dot(w_vector)
                     
                     # 3. Calculate Stats
                     confidence_level = 0.95
@@ -2425,7 +2452,7 @@ def render_risk_macro_dashboard(f_port, q_port):
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Daily VaR (95%)", f"€{var_val:,.2f}", f"{var_95*100:.2f}%")
                     c2.metric("Daily CVaR (Expected Tail Loss)", f"€{cvar_val:,.2f}", f"{cvar_95*100:.2f}%")
-                    c3.metric("Calculation Base", f"{len(unique_tickers)} Assets", "1 Year History")
+                    c3.metric("Calculation Base", f"{len(valid_tickers)} Assets", "1 Year History")
                     
                     # 5. Visualization (Histogram)
                     fig_hist = px.histogram(
@@ -3119,6 +3146,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
