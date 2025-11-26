@@ -1312,7 +1312,7 @@ def render_stock_research():
         t1, t2, t3 = st.tabs(["DES (Profile)", "FA (Financials)", "RV (Peers)"])
 
     # --- TAB 1: DESCRIPTION ---
-    with t1:
+        with t1:
             c1, c2 = st.columns([2, 1])
             c1.markdown("### Business Summary")
             c1.write(info.get('longBusinessSummary', 'No data.'))
@@ -3176,6 +3176,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
