@@ -35,44 +35,31 @@ def init_connection():
     except Exception as e:
         st.error(f"⚠️ Failed to connect to Google Sheets: {e}")
         return None
-
-def get_data_from_sheet(worksheet_name):
-    """Robust fetcher with Retry Logic for 429 Quota Errors."""
-    client = init_connection()
-    if not client: return pd.DataFrame()
-    
-    # Try up to 3 times
+def _fetch_single_sheet(client, sheet_name):
+    """Helper for the parallel executor with Retry Logic."""
+    # Try up to 3 times to handle API limits
     for attempt in range(3):
         try:
             sheet = client.open("TIC_Database_Master")
-            worksheet = sheet.worksheet(worksheet_name)
+            worksheet = sheet.worksheet(sheet_name)
             data = worksheet.get_all_values()
             
             if not data: return pd.DataFrame()
 
             headers = data.pop(0)
             df = pd.DataFrame(data, columns=headers)
-            
             # Clean empty columns
-            df = df.loc[:, [h != "" for h in headers]]
-            return df
+            return df.loc[:, [h != "" for h in headers]]
             
         except Exception as e:
             error_msg = str(e)
             if "429" in error_msg or "Quota exceeded" in error_msg:
-                # If it's a speed limit error, wait and try again
-                wait_time = (attempt + 1) * 2 # Wait 2s, then 4s, then 6s
-                time.sleep(wait_time)
+                time.sleep((attempt + 1) * 2) # Wait 2s, 4s, 6s
                 continue
             elif "WorksheetNotFound" in error_msg:
-                # Don't retry if sheet is missing
                 return pd.DataFrame()
             else:
-                # Real error
-                st.error(f"Error reading '{worksheet_name}': {e}")
                 return pd.DataFrame()
-                
-    st.error(f"Failed to load '{worksheet_name}' after retries. Google API busy.")
     return pd.DataFrame()
 
 # ==========================================
@@ -403,35 +390,60 @@ def fetch_real_benchmark_data(portfolio_df):
 
     return df_chart.dropna().reset_index().rename(columns={'index':'Date'})
     
-@st.cache_data(ttl=180)
+@st.cache_data(ttl=1800) # Cache Heavy Data for 30 mins
+def load_static_data():
+    # Fetches Portfolios and Members in PARALLEL.
+    client = init_connection()
+    if not client: return None, None, None, None
+
+    sheets_to_fetch = ["Fundamentals", "Quant", "Members", "Events"]
+    results = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_sheet = {executor.submit(_fetch_single_sheet, client, name): name for name in sheets_to_fetch}
+        for future in concurrent.futures.as_completed(future_to_sheet):
+            sheet_name = future_to_sheet[future]
+            results[sheet_name] = future.result()
+
+    return results["Fundamentals"], results["Quant"], results["Members"], results["Events"]
+
+@st.cache_data(ttl=60) # Cache Live Data for 60 seconds
+def load_dynamic_data():
+    # Fetches Fast-Moving data (Messages, Votes, Attendance).
+    # Also runs in parallel to minimize lag
+    client = init_connection()
+    if not client: return None, None, None, None
+
+    sheets_to_fetch = ["Messages", "Proposals", "Votes", "Attendance"]
+    results = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_sheet = {executor.submit(_fetch_single_sheet, client, name): name for name in sheets_to_fetch}
+        for future in concurrent.futures.as_completed(future_to_sheet):
+            sheet_name = future_to_sheet[future]
+            results[sheet_name] = future.result()
+
+    return results["Messages"], results["Proposals"], results["Votes"], results["Attendance"]
+
 def load_data():
-    # --- 1. SAFE INITIALIZATION (Defaults) ---
-    # Initialize everything first so we never get UnboundLocalError
+    # Master Load Function: Combines Static and Dynamic data
+    # 1. Fetch Data (Parallelized & Split)
+    f_port_raw, q_port_raw, df_mem, evts = load_static_data()
+    msgs, df_props, df_votes, att_raw = load_dynamic_data()
+    
+    # 2. Initialize Defaults
     members = pd.DataFrame()
-    f_port = pd.DataFrame()
-    q_port = pd.DataFrame()
-    messages = []
-    proposals = []
-    full_calendar = []
-    df_votes = pd.DataFrame()
-    att = pd.DataFrame(columns=['Date', 'Member', 'Status', 'Reason'])
-    
-    f_total = 0.0
-    q_total = 0.0
-    nav_fund = 100.00
-    nav_quant = 100.00
-    
-    # --- 2. LOAD PORTFOLIOS ---
-    f_port_raw = get_data_from_sheet("Fundamentals")
-    q_port_raw = get_data_from_sheet("Quant")
-    
-    # Helper: Clean Float
+    f_port = pd.DataFrame(); q_port = pd.DataFrame()
+    messages = []; proposals = []; full_calendar = []
+    f_total = 0.0; q_total = 0.0
+    nav_fund = 100.00; nav_quant = 100.00
+
+    # 3. Process Portfolios (Calculations)
     def clean_float(val):
         if pd.isna(val) or val == '': return 0.0
         try: return float(str(val).replace('€', '').replace(',', '').replace(' ', ''))
         except: return 0.0
 
-    # Helper: Calculate Live Total
     def calculate_live_total(df):
         total_val = 0.0
         if not df.empty:
@@ -443,6 +455,7 @@ def load_data():
             if not ticker_col:
                 return (clean_float(df['total'].iloc[0]) if 'total' in df.columns else 0.0), df
 
+            # Batch fetch prices for speed
             tickers = [t for t in df[ticker_col].unique() if isinstance(t, str) and "CASH" not in t.upper()]
             prices = fetch_live_prices_with_change(tickers)
             
@@ -466,21 +479,17 @@ def load_data():
 
     if not f_port_raw.empty:
         f_total, f_port = calculate_live_total(f_port_raw)
-        # Ensure target_weight is cleaned for charts
         if 'target_weight' in f_port.columns: 
             f_port['target_weight'] = f_port['target_weight'].apply(clean_float)
 
     if not q_port_raw.empty:
         q_total, q_port = calculate_live_total(q_port_raw)
-        # Normalize Quant Columns
         if 'ticker' in q_port.columns: q_port = q_port.rename(columns={'ticker': 'model_id'})
         if 'target_weight' in q_port.columns: q_port = q_port.rename(columns={'target_weight': 'allocation'})
         if 'allocation' in q_port.columns: q_port['allocation'] = q_port['allocation'].apply(clean_float)
 
-    # --- 3. LOAD MEMBERS & CALC NAV ---
-    df_mem = get_data_from_sheet("Members")
+    # 4. Process Members
     members_list = []
-    
     if not df_mem.empty:
         df_mem.columns = df_mem.columns.astype(str).str.strip()
         
@@ -518,43 +527,29 @@ def load_data():
             u_q = clean_float(row.get('Units_Quant', 0))
             real_value = (u_f * nav_fund) + (u_q * nav_quant)
             
-            # Last Login and Last Page
             last_active = str(row.get('Last Login', 'Never'))
-            last_p = str(row.get('Last_Page', 'Launchpad')) # Default to Launchpad if empty
+            last_p = str(row.get('Last_Page', 'Launchpad'))
 
             members_list.append({
-                'u': uname, 
-                'p': str(row.get('Password', 'pass')).strip(), 
-                'n': name, 
-                'email': email,
-                'r': role_data['r'], 
-                'd': role_data['d'], 
-                's': role_data['s'], 
+                'u': uname, 'p': str(row.get('Password', 'pass')).strip(), 'n': name, 'email': email,
+                'r': role_data['r'], 'd': role_data['d'], 's': role_data['s'], 
                 'admin': role_data.get('admin', False),
-                'status': 'Pending' if liq_val == 1 else 'Active', 
-                'liq_pending': liq_val,
+                'status': 'Pending' if liq_val == 1 else 'Active', 'liq_pending': liq_val,
                 'contribution': clean_float(row.get('Initial Investment', 0)),
-                'value': real_value, 
-                'units_fund': u_f, 
-                'units_quant': u_q,
-                'last_login': last_active,
-                'last_page': last_p,
+                'value': real_value, 'units_fund': u_f, 'units_quant': u_q,
+                'last_login': last_active, 'last_page': last_p,
                 'contract_text': "TIC MEMBERSHIP..."
             })
         members = pd.DataFrame(members_list)
-        
     else:
-        # Fallback Admin
         members = pd.DataFrame([{'u': 'admin', 'p': 'pass', 'n': 'Offline Admin', 'r': 'Admin', 'd': 'Board', 'admin': True, 'value': 0}])
 
-    # --- 4. MESSAGES ---
-    msgs = get_data_from_sheet("Messages")
+    # 5. Process Messages
     if not msgs.empty: 
         msgs.columns = msgs.columns.str.lower()
         messages = msgs.to_dict('records')
     
-    # --- 5. EVENTS ---
-    evts = get_data_from_sheet("Events")
+    # 6. Process Events
     manual_events = []
     if not evts.empty:
         evts['Date'] = pd.to_datetime(evts['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
@@ -567,31 +562,26 @@ def load_data():
 
     real_events = []
     if not f_port.empty and 'ticker' in f_port.columns:
-        # Safety: Check column exists before access
         valid_tickers = [t for t in f_port['ticker'].dropna().unique() if isinstance(t,str) and "CASH" not in t]
         if valid_tickers:
             real_events = fetch_company_events(valid_tickers)
     
     full_calendar = real_events + manual_events
 
-    # --- 6. VOTING ---
-    df_props = get_data_from_sheet("Proposals")
+    # 7. Process Proposals & Votes
     if not df_props.empty:
         df_props['ID'] = df_props['ID'].astype(str)
         proposals = df_props.to_dict('records')
 
-    df_votes = get_data_from_sheet("Votes")
     if not df_votes.empty:
         df_votes['Proposal_ID'] = df_votes['Proposal_ID'].astype(str)
 
-    # --- 7. ATTENDANCE ---
-    att_raw = get_data_from_sheet("Attendance")
-    if not att_raw.empty:
-        if 'Date' in att_raw.columns:
-            att_raw['Date'] = pd.to_datetime(att_raw['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-        att = att_raw
+    # 8. Process Attendance
+    att = att_raw
+    if not att.empty and 'Date' in att.columns:
+        att['Date'] = pd.to_datetime(att['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
 
-    return members, f_port, q_port, messages, proposals, full_calendar, f_total, q_total, df_votes, nav_fund, nav_quant, att    
+    return members, f_port, q_port, messages, proposals, full_calendar, f_total, q_total, df_votes, nav_fund, nav_quant, att
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
@@ -634,7 +624,6 @@ def fetch_stock_financials(ticker):
     return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 @st.cache_data(ttl=3600*12) # Cache for 12 hours
-@st.cache_data(ttl=3600*12)
 def fetch_peer_data_safe(main_ticker, sector):
     """
     Returns a dataframe of peers based on the sector.
@@ -3284,6 +3273,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
