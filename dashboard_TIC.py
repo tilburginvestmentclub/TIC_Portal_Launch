@@ -3122,7 +3122,19 @@ def main():
                 elif cmd_input in ["HOME", "LAUNCH", "LP"]:
                     st.session_state['previous_choice'] = "Launchpad"
                     st.rerun()
+                    
+                elif cmd_input in ["LIB", "LIBRARY","MINECRAFT", "CONTRACT"]:
+                    st.session_state['previous_choice'] = "Library"
+                    st.rerun()
+
+                elif cmd_input in ["SETTINGS", "SETT"]:
+                    st.session_state['previous_choice'] = "Settings"
+                    st.rerun()
                 
+                elif cmd_input in ["SIM", "SIMULATION"]:
+                    st.session_state['previous_choice'] = "Simulation"
+                    st.rerun()    
+                    
                 # 2. Ticker Lookup (Default behavior)
                 else:
                     # Assume it's a ticker (e.g., "TSLA") -> Go to Research Page
@@ -3320,6 +3332,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
