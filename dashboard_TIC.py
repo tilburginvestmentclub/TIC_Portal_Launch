@@ -14,6 +14,7 @@ from google.oauth2.service_account import Credentials
 import plotly.graph_objects as go
 import streamlit.components.v1 as components
 import time
+import threading
 
 # --- GOOGLE SHEETS CONNECTION SETUP ---
 SCOPES = [
@@ -516,8 +517,9 @@ def load_data():
             u_q = clean_float(row.get('Units_Quant', 0))
             real_value = (u_f * nav_fund) + (u_q * nav_quant)
             
-            # --- NEW: Extract Last Login from Sheet ---
+            # Last Login and Last Page
             last_active = str(row.get('Last Login', 'Never'))
+            last_p = str(row.get('Last_Page', 'Launchpad')) # Default to Launchpad if empty
 
             members_list.append({
                 'u': uname, 
@@ -534,7 +536,8 @@ def load_data():
                 'value': real_value, 
                 'units_fund': u_f, 
                 'units_quant': u_q,
-                'last_login': last_active, # <--- ADD THIS LINE
+                'last_login': last_active,
+                'last_page': last_p,
                 'contract_text': "TIC MEMBERSHIP..."
             })
         members = pd.DataFrame(members_list)
@@ -3139,26 +3142,43 @@ def main():
 
         menu.insert(0, "Launchpad")
         
-        # 2. Determine the Correct Index to keep us on the same page
-        # We look at the 'previous_choice' stored in session state
+        # 2. Determine the Correct Index (Priority: Session > Saved DB > Default)
         default_index = 0
-        current_selection = st.session_state.get('previous_choice', 'Dashboard')
         
+        # Check if we've already navigated in this session
+        target_page = st.session_state.get('previous_choice')
+        
+        # If not, try to fetch the Last Page saved in the database
+        if not target_page:
+             target_page = user.get('last_page', 'Launchpad')
+
+        # Find the matching index in the menu list
         for i, option in enumerate(menu):
-            # Flexible match: "Inbox" matches "Inbox (2)"
-            # This handles the label changing when unread count updates
-            if current_selection.split(" (")[0] in option:
+            # Partial match to handle "Inbox (1)" vs "Inbox"
+            if target_page in option:
                 default_index = i
                 break
         
-        # 3. Render the Radio Button
+        # 3. Render the Navigation
         nav = st.radio("Navigation", menu, index=default_index)
         
-        # 4. Save the selection immediately for next time
-        # We strip the " (1)" badge so the base name is saved (e.g. "Inbox")
-        st.session_state['previous_choice'] = nav.split(" (")[0]
+        # 4. Background Save (Optimized)
+        clean_nav = nav.split(" (")[0]
         
-        render_upcoming_events_sidebar(calendar_events)
+        # Only trigger updates if the page actually changed
+        if clean_nav != st.session_state.get('previous_choice', ''):
+            st.session_state['previous_choice'] = clean_nav
+            
+            # Update local session immediately so it feels instant
+            if user.get('last_page') != clean_nav:
+                st.session_state['user']['last_page'] = clean_nav
+                
+                # THREADING: Send API call to background thread to prevent UI lag
+                if user['r'] != 'Guest':
+                    threading.Thread(
+                        target=update_member_field_in_gsheet, 
+                        args=(user['u'], "Last_Page", clean_nav)
+                    ).start()
         st.divider()
         if st.button("Log Out"): st.session_state.clear(); st.rerun()
         
@@ -3263,6 +3283,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
