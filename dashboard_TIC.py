@@ -2065,116 +2065,107 @@ def render_simulation(user):
                 st.dataframe(df, use_container_width=True, hide_index=True)
             else: st.caption("Your portfolio is empty. Start trading.")
 
-def render_risk_macro_dashboard(portfolio):
+def render_risk_macro_dashboard(f_port, q_port):
     st.title("⚠️ Risk & Macro Observatory")
     
-    news = fetch_macro_news()
+    # 1. Define Tabs (Same as before)
+    tabs = ["Correlation Matrix", "Macro Indicators", "Market News"]
     
-    t1, t2, t3 = st.tabs(["Correlation Matrix", "Macro Indicators", "Market Intelligence"])
+    # 2. State Logic (Use session state to preserve the tab choice)
+    if 'risk_active_tab' not in st.session_state:
+        st.session_state['risk_active_tab'] = tabs[0]
     
-    with t1:
+    try:
+        curr_index = tabs.index(st.session_state['risk_active_tab'])
+    except:
+        curr_index = 0
+        
+    active_tab = st.radio("Risk View", tabs, index=curr_index, horizontal=True, label_visibility="collapsed")
+    st.session_state['risk_active_tab'] = active_tab
+    st.divider()
+
+    # --- TAB 1: CORRELATION MATRIX ---
+    if active_tab == "Correlation Matrix":
         st.subheader("Portfolio Correlation (Live)")
         
-        # 1. Fetch Data
-        if not portfolio.empty and 'ticker' in portfolio.columns:
-            # Filter Cash out
-            my_tickers = [t for t in portfolio['ticker'].unique() if isinstance(t,str) and "CASH" not in t.upper()]
-            
-            if len(my_tickers) > 1:
-                with st.spinner(f"Calculating correlations for {len(my_tickers)} assets..."):
-                    corr_matrix = fetch_correlation_data(my_tickers)
-                
-                if not corr_matrix.empty:
-                    # A. Render the Plot
-                    st.plotly_chart(
-                        px.imshow(
-                            corr_matrix, 
-                            text_auto=".2f", 
-                            aspect="auto", 
-                            color_continuous_scale="RdBu_r", 
-                            zmin=-1, zmax=1
-                        ), 
-                        use_container_width=True
-                    )
-                    
-                    # B. AUTOMATED INTERPRETATION & WARNINGS
-                    st.divider()
-                    st.subheader("🧠 Risk Analysis")
-                    
-                    # Logic to find high correlations
-                    # We look at the upper triangle of the matrix to avoid duplicates (A-B vs B-A)
-                    high_risk_pairs = []
-                    watch_list = []
-                    hedges = []
-                    
-                    cols = corr_matrix.columns
-                    for i in range(len(cols)):
-                        for j in range(i+1, len(cols)):
-                            val = corr_matrix.iloc[i, j]
-                            pair_name = f"{cols[i]} ↔ {cols[j]}"
-                            
-                            if val > 0.85:
-                                high_risk_pairs.append(f"{pair_name} ({val:.2f})")
-                            elif val > 0.65:
-                                watch_list.append(f"{pair_name} ({val:.2f})")
-                            elif val < -0.5:
-                                hedges.append(f"{pair_name} ({val:.2f})")
-                    
-                    c_warn, c_info = st.columns(2)
-                    
-                    with c_warn:
-                        if high_risk_pairs:
-                            st.error(f"🚨 **Critical Concentration ({len(high_risk_pairs)} pairs)**")
-                            st.caption("These assets move almost identically. You are not diversified here.")
-                            for item in high_risk_pairs[:5]: # Show top 5
-                                st.markdown(f"- {item}")
-                            if len(high_risk_pairs) > 5: st.caption(f"...and {len(high_risk_pairs)-5} more.")
-                        else:
-                            st.success("✅ No critical concentration risks found (>0.85).")
-
-                    with c_info:
-                        if hedges:
-                            st.info(f"🛡️ **Natural Hedges ({len(hedges)} pairs)**")
-                            st.caption("These assets tend to move in opposite directions, stabilizing the portfolio.")
-                            for item in hedges[:5]:
-                                st.markdown(f"- {item}")
-                        elif watch_list:
-                            st.warning(f"⚠️ **Watch List ({len(watch_list)} pairs)**")
-                            st.caption("Moderate correlation. Monitor these sectors.")
-                            with st.expander("View Pairs"):
-                                for item in watch_list: st.write(item)
-                        else:
-                            st.write("Portfolio correlation is balanced.")
-
-                    # Educational Note
-                    st.markdown("---")
-                    st.caption("ℹ️ **How to read this:** 1.0 = Perfect positive correlation (Move together). 0.0 = No relationship. -1.0 = Perfect negative correlation (Move opposite).")
-
+        # Radio to switch between views (Needs a unique key since it's a dedicated radio button)
+        view_mode = st.radio("Select Portfolio View:", ["Fundamental Assets", "Quant Assets"], horizontal=True, key="corr_view_select")
+        
+        target_df = f_port if view_mode == "Fundamental Assets" else q_port
+        
+        if not target_df.empty:
+            if 'ticker' in target_df.columns:
+                col_name = 'ticker'
+            elif 'model_id' in target_df.columns:
+                col_name = 'model_id'
             else:
-                st.info("Add at least 2 distinct equity assets to 'Fundamentals' to generate the matrix.")
-        else:
-            st.warning("Portfolio is empty or contains only Cash. Add positions in TIC_Database_Master.")
+                col_name = None
+                
+            if col_name:
+                my_tickers = [t for t in target_df[col_name].unique() if isinstance(t,str) and "CASH" not in t.upper()]
+                
+                if len(my_tickers) > 1:
+                    with st.spinner(f"Calculating correlations for {len(my_tickers)} assets..."):
+                        corr_matrix = fetch_correlation_data(my_tickers)
+                    
+                    if not corr_matrix.empty:
+                        st.plotly_chart(
+                            px.imshow(corr_matrix, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r", zmin=-1, zmax=1), 
+                            use_container_width=True
+                        )
+                        
+                        st.divider()
+                        st.subheader("🧠 Risk Analysis")
+                        high_risk = []
+                        hedges = []
+                        
+                        cols = corr_matrix.columns
+                        for i in range(len(cols)):
+                            for j in range(i+1, len(cols)):
+                                val = corr_matrix.iloc[i, j]
+                                pair = f"{cols[i]} ↔ {cols[j]}"
+                                if val > 0.85: high_risk.append(f"{pair} ({val:.2f})")
+                                elif val < -0.5: hedges.append(f"{pair} ({val:.2f})")
+                        
+                        c_warn, c_info = st.columns(2)
+                        with c_warn:
+                            if high_risk: st.error(f"🚨 **Critical Concentration ({len(high_risk)} pairs)**")
+                            else: st.success("✅ No critical concentration (>0.85).")
+                            
+                        with c_info:
+                            if hedges: st.info(f"🛡️ **Natural Hedges ({len(hedges)} pairs)**")
+                            else: st.write("No strong negative correlations.")
+
+                else: st.info("Not enough assets to calculate correlation (Need 2+).")
+            else: st.warning("Could not identify Ticker column.")
+        else: st.warning("Portfolio is empty.")
     
-    with t2:
+    # --- TAB 2: MACRO INDICATORS ---
+    elif active_tab == "Macro Indicators":
         st.subheader("Global Markets")
         macro = fetch_macro_data()
         c1, c2, c3, c4 = st.columns(4)
-        def show(col, lbl, k, fmt="%.2f"):
-            d = macro.get(k, {})
-            col.metric(lbl, fmt % d.get('value',0), f"{d.get('delta',0):.2f}")
-        show(c1, "10Y Yield", '10Y Treasury', "%.2f%%")
-        show(c2, "VIX", 'VIX')
-        show(c3, "EUR/USD", 'EUR/USD', "%.4f")
-        show(c4, "Oil", 'Crude Oil', "$%.2f")
         
-    with t3:
-        if not news: st.warning("RSS Feed unavailable.")
-        else:
-            c_news1, c_news2 = st.columns(2)
-            for i, item in enumerate(news):
-                with (c_news1 if i % 2 == 0 else c_news2):
-                    st.markdown(f"""<div class="news-item"><div class="news-source">{item['source']}</div><a class="news-head" href="{item['link']}" target="_blank">{item['title']}</a><div class="news-sum">{item['summary']}</div></div>""", unsafe_allow_html=True)
+        def show(col, lbl, k, fmt="%.2f"):
+            d = macro.get(k, {}); curr = d.get('value', 0); delta = d.get('delta', 0)
+            col.metric(lbl, fmt % curr, f"{delta:.2f}")
+            
+        show(c1, "🇺🇸 10Y Yield", '10Y Treasury', "%.2f%%")
+        show(c2, "😨 VIX Index", 'VIX')
+        show(c3, "💶 EUR/USD", 'EUR/USD', "%.4f")
+        show(c4, "🛢️ Crude Oil", 'Crude Oil', "$%.2f")
 
+    # --- TAB 3: MARKET NEWS ---
+    elif active_tab == "Market News":
+        st.subheader("Market Intelligence")
+        news = fetch_macro_news()
+        if news:
+            for item in news[:5]:
+                st.markdown(f"**{item['title']}**")
+                st.caption(f"{item['source']} • {item['published']}")
+                st.markdown(f"_{item['summary']}_")
+                st.markdown("---")
+                
 def render_fundamental_dashboard(user, portfolio, proposals):
     st.title(f"📈 Fundamental Dashboard")
     
@@ -2764,7 +2755,7 @@ def main():
             st.divider()
             render_voting_section(user, props, df_votes, "Fundamental")
             
-    elif nav == "Risk & Macro": render_risk_macro_dashboard(f_port)
+    elif "Risk & Macro" in nav: render_risk_macro_dashboard(f_port, q_port)
     elif nav == "Valuation Tool": render_valuation_sandbox() 
     elif nav == "Simulation": 
         t_sim, t_lead = st.tabs(["🎮 Trade", "🏆 Leaderboard"])
@@ -2813,6 +2804,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
