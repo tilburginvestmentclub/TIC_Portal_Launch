@@ -1066,6 +1066,7 @@ def send_new_message(from_user, to_user, subject, body):
 def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calendar_events):
     """
     Role-Based Homepage with REAL Data Connections.
+    FIXED: Added type conversion to prevent math errors on string data.
     """
     # 1. Dynamic Greeting
     h = datetime.now().hour
@@ -1081,7 +1082,6 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
     c1.metric("TIC Total AUM", f"€{f_total + q_total:,.0f}")
     
     # Calculate User's Personal Performance
-    # (Value - Contribution) / Contribution
     u_val = user.get('value', 0)
     u_cont = user.get('contribution', 1)
     u_perf = ((u_val - u_cont) / u_cont) * 100 if u_cont > 0 else 0.0
@@ -1091,16 +1091,20 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
     # 3. QUANT VIEW (Data-Driven)
     # ==========================================
     if user['d'] == 'Quant':
-        # A. Calculate Real Stats from q_port
         active_models = 0
         top_asset = "N/A"
+        
         if not q_port.empty:
-            # Count unique strategies
             if 'model_id' in q_port.columns:
                 active_models = q_port['model_id'].nunique()
-            # Find largest holding
-            top_row = q_port.sort_values('market_value', ascending=False).iloc[0]
-            top_asset = f"{top_row.get('ticker', 'N/A')} ({top_row.get('allocation', 0)*100:.1f}%)"
+            
+            # Ensure market_value is numeric for sorting
+            q_port['mv_numeric'] = pd.to_numeric(q_port['market_value'], errors='coerce').fillna(0)
+            top_row = q_port.sort_values('mv_numeric', ascending=False).iloc[0]
+            
+            # Safe access to allocation
+            alloc = pd.to_numeric(top_row.get('allocation', 0), errors='coerce') * 100
+            top_asset = f"{top_row.get('ticker', 'N/A')} ({alloc:.1f}%)"
 
         c3.metric("Quant NAV", f"€{nav_q:.2f}")
         c4.metric("Active Models", str(active_models))
@@ -1112,7 +1116,6 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
         with col_q1:
             st.info(f"🏆 Top Conviction: **{top_asset}**")
             st.markdown("##### System Status")
-            # Mock system check
             st.markdown(f"""
             - **Data Pipeline:** 🟢 Nominal
             - **Risk Engine:** 🟢 Active (VaR calculated)
@@ -1128,22 +1131,19 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
     # 4. FUNDAMENTAL VIEW (Data-Driven)
     # ==========================================
     elif user['d'] == 'Fundamental':
-        # A. Find Next Earnings Date from Calendar
         next_event = "None"
         days_away = 0
         
-        # Filter for 'market' events (earnings)
         earnings = [e for e in calendar_events if e['type'] == 'market']
         if earnings:
-            # Sort by date
             earnings.sort(key=lambda x: x['date'])
-            # Get first one
             next_e = earnings[0]
             next_event = f"{next_e['ticker']}"
-            
-            # Calc days away
-            d_date = datetime.strptime(next_e['date'], '%Y-%m-%d')
-            days_away = (d_date - datetime.now()).days
+            try:
+                d_date = datetime.strptime(next_e['date'], '%Y-%m-%d')
+                days_away = (d_date - datetime.now()).days
+            except:
+                days_away = 0
 
         c3.metric("Fund NAV", f"€{nav_f:.2f}")
         c4.metric("Next Earnings", next_event, f"{days_away} days")
@@ -1154,9 +1154,12 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
         col_f1, col_f2 = st.columns([2, 1])
         with col_f1:
             st.info("🔥 **Market Focus**")
-            # Show top 3 largest holdings in Fundamental Port
-            if not f_port.empty:
-                top_3 = f_port.sort_values('market_value', ascending=False).head(3)
+            if not f_port.empty and 'market_value' in f_port.columns:
+                # Create numeric copy for sorting
+                f_port_sorted = f_port.copy()
+                f_port_sorted['mv_numeric'] = pd.to_numeric(f_port_sorted['market_value'], errors='coerce').fillna(0)
+                
+                top_3 = f_port_sorted.sort_values('mv_numeric', ascending=False).head(3)
                 txt = " • ".join([f"{r['ticker']}" for _, r in top_3.iterrows()])
                 st.write(f"**Top Holdings:** {txt}")
             else:
@@ -1168,7 +1171,7 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
             st.button("🔎 DCF Model")
 
     # ==========================================
-    # 5. BOARD / GENERAL VIEW
+    # 5. BOARD / GENERAL VIEW (FIXED)
     # ==========================================
     else: 
         c3.metric("Fund NAV", f"€{nav_f:.2f}")
@@ -1177,15 +1180,25 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
         st.divider()
         st.subheader("🏛️ Board Overview")
         
-        # Show Cash vs Equity split
-        cash_total = 0
-        # Sum cash from both portfolios (approximate)
-        if not f_port.empty:
-            cash_total += f_port[f_port['ticker'].str.contains("CASH", na=False)]['market_value'].sum()
+        # --- FIXED CALCULATION LOGIC ---
+        cash_total = 0.0
+        
+        # 1. Fundamental Cash
+        if not f_port.empty and 'ticker' in f_port.columns:
+            # Find rows with "CASH"
+            mask = f_port['ticker'].str.contains("CASH", case=False, na=False)
+            # Convert to numeric before summing (Handles "€1,000" strings)
+            cash_vals = pd.to_numeric(f_port.loc[mask, 'market_value'], errors='coerce').fillna(0)
+            cash_total += cash_vals.sum()
+            
+        # 2. Quant Cash
         if not q_port.empty:
-             # Check for ticker col availability in quant
-             q_tick = 'ticker' if 'ticker' in q_port.columns else 'model_id'
-             cash_total += q_port[q_port[q_tick].str.contains("CASH", na=False)]['market_value'].sum()
+            q_tick = 'ticker' if 'ticker' in q_port.columns else 'model_id'
+            if q_tick in q_port.columns:
+                mask_q = q_port[q_tick].str.contains("CASH", case=False, na=False)
+                # Convert to numeric
+                q_vals = pd.to_numeric(q_port.loc[mask_q, 'market_value'], errors='coerce').fillna(0)
+                cash_total += q_vals.sum()
              
         b1, b2 = st.columns(2)
         with b1:
@@ -3250,6 +3263,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
