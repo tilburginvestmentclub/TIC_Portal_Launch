@@ -2933,7 +2933,7 @@ def main():
             menu.insert(0, "Dashboard")
             
         # Fundamental Specific Tools
-        if user['d'] in ['Fundamental', 'Board', 'Advisory'] or user.get('r') == 'Guest'
+        if user['d'] in ['Fundamental', 'Board', 'Advisory'] or user.get('r') == 'Guest':
             menu.insert(3, "Valuation Tool")
 
         menu.insert(2, "Stock Research")
@@ -3063,6 +3063,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
