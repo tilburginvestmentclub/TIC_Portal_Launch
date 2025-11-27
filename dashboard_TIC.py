@@ -453,6 +453,12 @@ def load_data():
         except: return 0.0
 
     def calculate_live_total(df):
+        """
+        Calculates portfolio value in EUROS.
+        1. Detects Currency based on Ticker Suffix (.T=JPY, .L=GBP, No Suffix=USD).
+        2. Fetches FX Rates (e.g. JPYEUR=X).
+        3. Normalizes: Units * Stock_Price * FX_Rate * (1/100 if Pence).
+        """
         total_val = 0.0
         
         if df.empty:
@@ -461,87 +467,110 @@ def load_data():
         # Normalize columns
         df.columns = df.columns.astype(str).str.lower().str.strip()
 
-        # SAFETY FIX:
+        # SAFETY: Create market_value if missing
         if 'market_value' not in df.columns:
             df['market_value'] = 0.0
         
         # Identify key columns
         ticker_col = 'ticker' if 'ticker' in df.columns else 'model_id'
         
-        # --- 1. BUILD TICKER MAPPING (Asset -> Yahoo Symbol) ---
+        # --- 1. CLASSIFY ASSETS & BUILD FETCH LIST ---
         sheet_tickers = [str(t).upper().strip() for t in df[ticker_col].unique() if t]
         
-        yahoo_map = {}
-        to_fetch = []
+        to_fetch_prices = [] # Stocks/ETFs
+        to_fetch_fx = set()  # Currency Rates needed (Set to avoid duplicates)
         
-        # List of common currencies to auto-convert to EUR
-        # Ticker "USD" becomes "USDEUR=X"
-        currencies = ["USD", "GBP", "JPY", "CHF", "CAD", "AUD", "SGD", "HKD"]
+        asset_meta = {} # Store metadata: { '8001.T': {'currency': 'JPY', 'is_pence': False} }
+
+        # Suffix Rules
+        euro_suffixes = ['.DE', '.PA', '.AS', '.BR', '.MI', '.MC', '.HE', '.VI', '.LS']
         
         for t in sheet_tickers:
-            # CASE A: Base Currency (Euro)
+            # CLEANUP: Handle 'CASH_USD' -> 'USD'
+            clean_t = t.replace("CASH_", "").replace("CASH ", "").strip()
+            
+            # --- TYPE A: CASH CURRENCIES ---
             if clean_t in ["EUR", "EURO", "CASH"]:
-                yahoo_map[t] = None 
+                asset_meta[t] = {'type': 'cash', 'currency': 'EUR', 'is_pence': False}
                 
-            # CASE B: Foreign Currency (Convert to EUR)
-            elif clean_t in currencies:
-                fx_ticker = f"{clean_t}EUR=X" 
-                yahoo_map[t] = fx_ticker      
-                to_fetch.append(fx_ticker)
+            elif clean_t in ["USD", "GBP", "JPY", "CHF", "CAD", "AUD", "HKD"]:
+                asset_meta[t] = {'type': 'cash', 'currency': clean_t, 'is_pence': False}
+                to_fetch_fx.add(f"{clean_t}EUR=X")
 
-            # CASE C: UK Stocks (e.g. "RR." or "SHEL.L")
-            # If it ends in dot (RR.) or has .L, treat as UK
-            elif t.endswith(".") or t.endswith(".L"):
-                # Ensure it ends in .L for Yahoo
-                y_ticker = t + "L" if t.endswith(".") else t
-                yahoo_map[t] = y_ticker
-                to_fetch.append(y_ticker)
-                uk_tickers.append(y_ticker) # Mark for /100 division later
-                
-            # CASE D: Standard Asset
+            # --- TYPE B: STOCKS / ASSETS ---
             else:
-                yahoo_map[t] = t
-                to_fetch.append(t)
+                to_fetch_prices.append(t)
+                
+                # Rule 1: Japan (.T)
+                if t.endswith(".T"):
+                    asset_meta[t] = {'type': 'stock', 'currency': 'JPY', 'is_pence': False}
+                    to_fetch_fx.add("JPYEUR=X")
+                    
+                # Rule 2: UK (.L) -> Pence
+                elif t.endswith(".L") or t.endswith(".LON"):
+                    asset_meta[t] = {'type': 'stock', 'currency': 'GBP', 'is_pence': True}
+                    to_fetch_fx.add("GBPEUR=X")
+                
+                # Rule 3: Eurozone (No conversion)
+                elif any(t.endswith(s) for s in euro_suffixes):
+                    asset_meta[t] = {'type': 'stock', 'currency': 'EUR', 'is_pence': False}
+                
+                # Rule 4: Default to USD (US Stocks usually have no suffix)
+                else:
+                    asset_meta[t] = {'type': 'stock', 'currency': 'USD', 'is_pence': False}
+                    to_fetch_fx.add("USDEUR=X")
 
-        # --- 2. BATCH FETCH PRICES ---
-        price_map = fetch_live_prices_with_change(to_fetch)
+        # --- 2. BATCH FETCH EVERYTHING ---
+        # Combine lists to fetch efficiently
+        all_tickers_to_fetch = to_fetch_prices + list(to_fetch_fx)
+        live_data = fetch_live_prices_with_change(all_tickers_to_fetch)
 
-        # --- 3. CALCULATE VALUE ---
+        # --- 3. CALCULATE VALUE (NORMALIZED TO EUR) ---
         for index, row in df.iterrows():
-            raw_ticker = str(row.get(ticker_col, '')).upper().strip()
-            y_sym = yahoo_map.get(raw_ticker, raw_ticker)
+            ticker = str(row.get(ticker_col, '')).upper().strip()
+            meta = asset_meta.get(ticker, {'type': 'stock', 'currency': 'EUR', 'is_pence': False})
             
             # Get Units
             units = 0.0
-            if 'units' in df.columns: 
-                units = clean_float(row.get('units', 0))
-            elif 'allocation' in df.columns: 
-                units = clean_float(row.get('allocation', 0))
-            
-            # Determine Price / Rate
-            price = 0.0
-            
-            if y_sym is None:
-                # It is EUR/CASH
-                price = 1.0
+            if 'units' in df.columns: units = clean_float(row.get('units', 0))
+            elif 'allocation' in df.columns: units = clean_float(row.get('allocation', 0))
+
+            # 1. GET RAW PRICE (Asset Price or 1.0 for Cash)
+            raw_price = 0.0
+            if meta['type'] == 'cash':
+                raw_price = 1.0
             else:
-                # It is Stock or FX
-                price = price_map.get(y_sym, {}).get('price', 0.0)
+                raw_price = live_data.get(ticker, {}).get('price', 0.0)
+
+            # 2. HANDLE PENCE (UK Only)
+            if meta['is_pence']:
+                raw_price = raw_price / 100.0
+
+            # 3. GET FX RATE (Convert to EUR)
+            curr = meta['currency']
+            if curr == 'EUR':
+                fx_rate = 1.0
+            else:
+                # Look for "JPYEUR=X" in the fetch results
+                fx_ticker = f"{curr}EUR=X"
+                fx_rate = live_data.get(fx_ticker, {}).get('price', 0.0)
+                
+                # Fallback: If FX API fails, assume 1.0 to avoid zeroing out portfolio
+                if fx_rate == 0.0: fx_rate = 1.0 
+
+            # 4. FINAL CALCULATION
+            # Value = Units * (Price in Local Currency) * (Exchange Rate to EUR)
+            final_val_eur = units * raw_price * fx_rate
             
-            # Calculate Row Value (Units * Price)
-            # If price is 0 (API error), value becomes 0 (safer than stale data)
-            row_val = units * price
+            df.at[index, 'market_value'] = final_val_eur
             
-            # Update DataFrame
-            df.at[index, 'market_value'] = row_val
+            # Optional: Debug info in a hidden column if you ever need it
+            df.at[index, 'debug_fx'] = fx_rate
             
-            # Optional: Store the live price used for reference
-            df.at[index, 'live_price'] = price 
-            
-            total_val += row_val
+            total_val += final_val_eur
 
         return total_val, df
-    
+        
     if not f_port_raw.empty:
         f_total, f_port = calculate_live_total(f_port_raw)
         if 'target_weight' in f_port.columns: 
@@ -3385,6 +3414,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
