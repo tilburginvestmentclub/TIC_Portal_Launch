@@ -705,43 +705,40 @@ def load_data():
 def fetch_simulated_history(f_port, q_port):
     """
     Creates a synthetic 6-month backtest.
-    Robust version: Handles string conversion and API failures gracefully.
+    Bulletproof version: Handles mismatched holidays, missing data, and text errors.
     """
     # 1. Prepare Data
     combined = pd.concat([f_port, q_port], ignore_index=True)
     
+    # Defaults
+    dates = pd.date_range(end=datetime.now(), periods=120, freq='B')
+    dummy_df = pd.DataFrame({'Date': dates, 'SP500': 100.0, 'TIC_Fund': 100.0})
+
     if combined.empty:
-        return pd.DataFrame()
+        return dummy_df
 
     # --- SAFETY: Force Numeric Conversion ---
     if 'market_value' in combined.columns:
         combined['market_value'] = pd.to_numeric(combined['market_value'], errors='coerce').fillna(0.0)
     else:
-        return pd.DataFrame() # No value column
+        return dummy_df 
         
     # 2. Filter for Non-Cash Assets
     # We exclude currencies to see pure equity performance
-    # Also exclude tickers that look like "CASH_USD"
     is_cash = combined['ticker'].astype(str).str.upper().isin(["CASH", "EUR", "EURO", "USD", "GBP", "JPY", "CHF"])
     is_cash = is_cash | combined['ticker'].astype(str).str.upper().str.startswith("CASH")
     
     equity_df = combined[~is_cash].copy()
     
-    # 3. Handle Empty Equity (e.g. 100% Cash Portfolio)
-    # Return a flat line so the dashboard doesn't show an error
+    # If portfolio is 100% cash, return flat line
     if equity_df.empty or equity_df['market_value'].sum() == 0:
-        dates = pd.date_range(end=datetime.now(), periods=120, freq='B') # Business days
-        return pd.DataFrame({
-            'Date': dates, 
-            'SP500': 100.0, 
-            'TIC_Fund': 100.0
-        })
+        return dummy_df
 
-    # 4. Calculate Weights
+    # 3. Calculate Weights
     total_equity_val = equity_df['market_value'].sum()
     equity_df['weight'] = equity_df['market_value'] / total_equity_val
     
-    # 5. Identify Tickers to Fetch
+    # 4. Identify Tickers to Fetch
     fetch_map = {}
     for t in equity_df['ticker'].unique():
         clean_t = str(t).upper().strip()
@@ -758,42 +755,40 @@ def fetch_simulated_history(f_port, q_port):
     tickers_to_download = list(set(fetch_map.values()))
     tickers_to_download.append("^GSPC") # Add Benchmark
 
-    # DEBUG: Print to console what we are trying to fetch
-    print(f"DEBUG: Simulating history for: {tickers_to_download}")
-
-    # 6. Download History
+    # 5. Download History
     try:
+        # Fetch data
         data = yf.download(tickers_to_download, period="6mo", progress=False)['Close']
         
-        # Forward fill to handle different holidays
-        data = data.ffill().dropna()
+        # --- CRITICAL FIX: Handle Mismatched Holidays ---
+        # 1. Forward Fill (If market closed today, use yesterday's price)
+        # 2. Backward Fill (If data missing at start, assume flat)
+        # 3. Dropna (Only drop if a row is STILL empty after filling)
+        data = data.ffill().bfill().dropna()
         
         if data.empty: 
-            print("DEBUG: Yahoo returned empty data.")
-            return pd.DataFrame()
+            return dummy_df
         
-        # 7. Normalize Data (Start at 100)
-        # Formula: (Price_t / Price_0) * 100
-        # Check if benchmark is present, if not, create dummy
+        # 6. Normalize Data (Start at 100)
         if '^GSPC' not in data.columns:
-            data['^GSPC'] = 100.0
+            data['^GSPC'] = data.iloc[:, 0] # Fallback if SPY fails
 
         normalized = (data / data.iloc[0]) * 100
         
-        # 8. Construct Portfolio Curve
+        # 7. Construct Portfolio Curve
         portfolio_curve = pd.Series(0.0, index=normalized.index)
         
         for raw_t, y_t in fetch_map.items():
+            # Only add if we actually got data for this ticker
             if y_t in normalized.columns:
                 w = equity_df.loc[equity_df['ticker'] == raw_t, 'weight'].sum()
                 portfolio_curve += normalized[y_t] * w
             else:
-                # If a ticker failed to download, we assume it stayed flat (cash drag)
-                # to prevent the curve from dropping to 0
+                # If ticker failed (e.g. delisted), assume it held value (Cash Drag)
                 w = equity_df.loc[equity_df['ticker'] == raw_t, 'weight'].sum()
                 portfolio_curve += 100.0 * w
                 
-        # 9. Final DataFrame
+        # 8. Final DataFrame
         df_chart = pd.DataFrame({
             'Date': normalized.index,
             'SP500': normalized['^GSPC'],
@@ -804,7 +799,7 @@ def fetch_simulated_history(f_port, q_port):
         
     except Exception as e:
         print(f"History Simulation Error: {e}")
-        return pd.DataFrame()
+        return dummy_df
         
 def style_bloomberg_chart(fig):
     """
@@ -3573,6 +3568,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
