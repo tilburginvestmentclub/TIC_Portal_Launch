@@ -701,6 +701,96 @@ def load_data():
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
+@st.cache_data(ttl=3600*12) # Cache for 12 hours (History doesn't change fast)
+def fetch_simulated_history(f_port, q_port):
+    """
+    Creates a synthetic 6-month backtest.
+    Assumes current holdings were held constant for the last 6 months.
+    Uses Weighted Average Return to be currency-neutral.
+    """
+    # 1. Prepare Data
+    # Combine portfolios
+    combined = pd.concat([f_port, q_port], ignore_index=True)
+    
+    if combined.empty or 'market_value' not in combined.columns:
+        return pd.DataFrame()
+
+    # 2. Filter for Non-Cash Assets (Stocks only for the curve)
+    # We filter out "CASH", "EUR", "USD" to see the equity performance
+    # If you want to see the dampening effect of cash, remove this filter logic.
+    is_cash = combined['ticker'].astype(str).str.upper().isin(["CASH", "EUR", "EURO", "USD", "GBP", "JPY"])
+    # Also check "CASH_" prefix just in case
+    is_cash = is_cash | combined['ticker'].astype(str).str.upper().str.contains("CASH_")
+    
+    equity_df = combined[~is_cash].copy()
+    
+    if equity_df.empty:
+        # Return dummy data if only cash
+        dates = pd.date_range(end=datetime.now(), periods=100)
+        return pd.DataFrame({'Date': dates, 'SP500': 100, 'TIC_Fund': 100})
+
+    # 3. Calculate Weights
+    total_equity_val = equity_df['market_value'].sum()
+    if total_equity_val == 0: return pd.DataFrame()
+    
+    equity_df['weight'] = equity_df['market_value'] / total_equity_val
+    
+    # 4. Identify Tickers to Fetch
+    # Map tickers to Yahoo format (handle the UK .L issue again)
+    fetch_map = {}
+    for t in equity_df['ticker'].unique():
+        clean_t = str(t).upper().strip()
+        if clean_t.endswith(".") or clean_t.endswith(".L"):
+            y_t = clean_t + "L" if clean_t.endswith(".") else clean_t
+            fetch_map[clean_t] = y_t
+        elif clean_t.endswith(".T"):
+             fetch_map[clean_t] = clean_t # Japan works as is
+        else:
+            fetch_map[clean_t] = clean_t
+            
+    tickers_to_download = list(set(fetch_map.values()))
+    tickers_to_download.append("^GSPC") # Add Benchmark
+
+    # 5. Download History
+    try:
+        data = yf.download(tickers_to_download, period="6mo", progress=False)['Close']
+        
+        # Forward fill to handle different holidays in different countries
+        data = data.ffill().dropna()
+        
+        if data.empty: return pd.DataFrame()
+        
+        # 6. Normalize Data (Start at 100)
+        # Formula: (Price_t / Price_0) * 100
+        normalized = (data / data.iloc[0]) * 100
+        
+        # 7. Construct Portfolio Curve
+        # Start with 0
+        portfolio_curve = pd.Series(0.0, index=normalized.index)
+        
+        # Loop through assets and add weighted curve
+        for raw_t, y_t in fetch_map.items():
+            if y_t in normalized.columns:
+                # Get weight from our dataframe
+                # Sum in case of duplicates
+                w = equity_df.loc[equity_df['ticker'] == raw_t, 'weight'].sum()
+                
+                # Add (Normalized_Curve * Weight) to total
+                portfolio_curve += normalized[y_t] * w
+                
+        # 8. Final DataFrame
+        df_chart = pd.DataFrame({
+            'Date': normalized.index,
+            'SP500': normalized['^GSPC'] if '^GSPC' in normalized.columns else 100,
+            'TIC_Fund': portfolio_curve
+        })
+        
+        return df_chart.reset_index(drop=True)
+        
+    except Exception as e:
+        print(f"History Error: {e}")
+        return pd.DataFrame()
+        
 def style_bloomberg_chart(fig):
     """
     Applies the classic Black/Amber/Neon terminal styling to any Plotly figure.
@@ -2758,17 +2848,23 @@ def render_fundamental_dashboard(user, portfolio, proposals):
     
     st.subheader("Performance vs Market (6 Months)")
     
-    # 1. Fetch Data
-    bench = fetch_real_benchmark_data(portfolio)
+    # --- NEW SIMULATION LOGIC ---
+    with st.spinner("Simulating 6-month historical performance..."):
+        # We pass both portfolios to get the full picture
+        bench_df = fetch_simulated_history(portfolio, q_port if 'q_port' in locals() else pd.DataFrame())
     
-    # 2. Plot
-    fig = px.line(bench, x='Date', y=['SP500', 'TIC_Fund'])
-    
-    # APPLY THEME HERE
-    fig = style_bloomberg_chart(fig)
-    
-    # Custom colors for lines (Neon Blue & Gold)
-    fig.update_traces(line=dict(width=2))
+    if not bench_df.empty:
+        # Create Line Chart
+        fig = px.line(bench_df, x='Date', y=['SP500', 'TIC_Fund'], 
+                      color_discrete_map={"SP500": "#FFA028", "TIC_Fund": "#00FF00"})
+        
+        # Bloomberg Style
+        fig = style_bloomberg_chart(fig)
+        fig.update_layout(yaxis_title="Rebased (100)", legend_title=None)
+        
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("Not enough data to generate performance chart.")
     
     st.plotly_chart(fig, use_container_width=True)
     
@@ -3183,13 +3279,52 @@ def main():
         return
     user = st.session_state['user']
     
-    # FETCH PRICES FOR TAPE
-    # Get top 15 tickers from fund portfolio to display
+    # ==========================================
+    # FETCH PRICES FOR TAPE (Assets & FX Rates)
+    # ==========================================
+    tape_tickers = []
+    
+    # 1. Gather Unique Assets from both portfolios
+    all_assets = set()
     if not f_port.empty and 'ticker' in f_port.columns:
-        all_tickers = f_port['ticker'].dropna().unique().tolist()
-        live_data = fetch_live_prices_with_change(all_tickers)
-        render_ticker_tape(live_data)
+        all_assets.update(f_port['ticker'].dropna().unique())
+        
+    if not q_port.empty:
+         # Handle Quant having 'ticker' or 'model_id'
+         q_col = 'ticker' if 'ticker' in q_port.columns else 'model_id'
+         if q_col in q_port.columns:
+             all_assets.update(q_port[q_col].dropna().unique())
 
+    # 2. Process Tickers for Display
+    for t in all_assets:
+        raw = str(t).upper().strip()
+        # Clean up "CASH_" prefix to find real currency
+        clean = raw.replace("CASH_", "").replace("CASH ", "").strip()
+        
+        # A. SKIP Base Currency (No need to show EUR=1.0)
+        if clean in ["EUR", "EURO", "CASH"]:
+            continue
+            
+        # B. CONVERT Foreign Cash to FX Pairs (e.g. USD -> USDEUR=X)
+        elif clean in ["USD", "GBP", "JPY", "CHF", "CAD", "AUD", "HKD"]:
+            tape_tickers.append(f"{clean}EUR=X")
+            
+        # C. HANDLE Stocks (Fix UK/Japan suffixes)
+        else:
+            if clean.endswith(".") or clean.endswith(".L"):
+                # UK Stocks: RR. -> RR.L
+                y_t = clean + "L" if clean.endswith(".") else clean
+                tape_tickers.append(y_t)
+            else:
+                tape_tickers.append(clean)
+
+    # 3. Fetch & Render
+    if tape_tickers:
+        # Deduplicate and Limit to avoid massive banner
+        final_list = list(set(tape_tickers))[:30]
+        live_data = fetch_live_prices_with_change(final_list)
+        render_ticker_tape(live_data)
+        
     with st.sidebar:
         with st.form(key='cli_form', clear_on_submit=True):
             cmd_input = st.text_input("COMMAND >", placeholder="Terminal Engine").upper()
@@ -3414,6 +3549,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
