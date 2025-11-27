@@ -114,6 +114,11 @@ st.markdown("""
             font-weight: bold;
         }
         
+        /* HIDES THE "Press Enter to apply" / "Press Enter to submit" HINTS */
+    div[data-testid="InputInstructions"] {
+        display: none !important;
+        }
+        
         /* METRIC BOX STYLE */
         div[data-testid="stMetric"] {
             background-color: var(--secondary-background-color);
@@ -455,6 +460,10 @@ def load_data():
 
         # Normalize columns
         df.columns = df.columns.astype(str).str.lower().str.strip()
+
+        # SAFETY FIX:
+        if 'market_value' not in df.columns:
+            df['market_value'] = 0.0
         
         # Identify key columns
         ticker_col = 'ticker' if 'ticker' in df.columns else 'model_id'
@@ -3140,7 +3149,7 @@ def main():
 
     with st.sidebar:
         with st.form(key='cli_form', clear_on_submit=True):
-            cmd_input = st.text_input("COMMAND >", placeholder="Type & Hit Enter").upper()
+            cmd_input = st.text_input("COMMAND >", placeholder="Terminal Engine").upper()
             submit = st.form_submit_button("GO", use_container_width=True)
             
             if submit and cmd_input:
@@ -3362,6 +3371,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
