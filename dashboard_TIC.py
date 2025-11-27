@@ -448,65 +448,84 @@ def load_data():
         except: return 0.0
 
     def calculate_live_total(df):
-        """
-        Calculates portfolio value by: Units (from Sheet) * Price (from Yahoo).
-        """
         total_val = 0.0
-    
+        
         if df.empty:
             return 0.0, df
 
         # Normalize columns
         df.columns = df.columns.astype(str).str.lower().str.strip()
-    
+        
         # Identify key columns
         ticker_col = 'ticker' if 'ticker' in df.columns else 'model_id'
-    
-        # 1. BATCH FETCH PRICES (This hits the 1-hour cache)
-        # We only fetch tickers that are NOT cash
-        tickers_to_fetch = [
-            t for t in df[ticker_col].unique() 
-            if isinstance(t, str) and "CASH" not in t.upper()
-        ]
-        price_map = fetch_live_prices_with_change(tickers_to_fetch)
-
-        # 2. Iterate and Calculate
-        for index, row in df.iterrows():
-            ticker = str(row.get(ticker_col, '')).upper().strip()
         
-            # Get Units (Quantity) from Sheet
+        # --- 1. BUILD TICKER MAPPING (Asset -> Yahoo Symbol) ---
+        sheet_tickers = [str(t).upper().strip() for t in df[ticker_col].unique() if t]
+        
+        yahoo_map = {}
+        to_fetch = []
+        
+        # List of common currencies to auto-convert to EUR
+        # Ticker "USD" becomes "USDEUR=X"
+        currencies = ["USD", "GBP", "JPY", "CHF", "CAD", "AUD", "SGD", "HKD"]
+        
+        for t in sheet_tickers:
+            # CASE A: Base Currency (Euro)
+            if t in ["CASH", "EUR", "EURO"]:
+                yahoo_map[t] = None # No fetch needed, price is 1.0
+                
+            # CASE B: Foreign Currency (Convert to EUR)
+            elif t in currencies:
+                fx_ticker = f"{t}EUR=X" # Yahoo format for "1 Unit of T to EUR"
+                yahoo_map[t] = fx_ticker
+                to_fetch.append(fx_ticker)
+                
+            # CASE C: Standard Asset (Stock/ETF)
+            else:
+                # If user explicitly wrote "CASH_USD", handle it if needed, 
+                # otherwise assume it's a regular ticker
+                yahoo_map[t] = t
+                to_fetch.append(t)
+
+        # --- 2. BATCH FETCH PRICES ---
+        price_map = fetch_live_prices_with_change(to_fetch)
+
+        # --- 3. CALCULATE VALUE ---
+        for index, row in df.iterrows():
+            raw_ticker = str(row.get(ticker_col, '')).upper().strip()
+            y_sym = yahoo_map.get(raw_ticker, raw_ticker)
+            
+            # Get Units
             units = 0.0
             if 'units' in df.columns: 
                 units = clean_float(row.get('units', 0))
             elif 'allocation' in df.columns: 
-                # Fallback for Quant if using % allocation instead of units
                 units = clean_float(row.get('allocation', 0))
             
-            # Get Sheet Value (Only used as fallback or for CASH)
-            sheet_val = clean_float(row.get('market_value', 0))
-        
-            # --- CALCULATION LOGIC ---
-            if "CASH" in ticker:
-                # CASH: Trust the sheet value (e.g., bank balance)
-                row_val = sheet_val
-            else:
-                # STOCK: Always calculate Units * Live Price
-                live_price = price_map.get(ticker, {}).get('price', 0.0)
+            # Determine Price / Rate
+            price = 0.0
             
-                if live_price > 0:
-                    row_val = units * live_price
-                else:
-                    # Fallback: If Yahoo is dead, use Sheet Value to prevent portfolio showing €0
-                    row_val = sheet_val 
-
-            # Update the dataframe 'market_value' column for display
-            # This ensures the dashboard table matches the big total
+            if y_sym is None:
+                # It is EUR/CASH
+                price = 1.0
+            else:
+                # It is Stock or FX
+                price = price_map.get(y_sym, {}).get('price', 0.0)
+            
+            # Calculate Row Value (Units * Price)
+            # If price is 0 (API error), value becomes 0 (safer than stale data)
+            row_val = units * price
+            
+            # Update DataFrame
             df.at[index, 'market_value'] = row_val
-        
+            
+            # Optional: Store the live price used for reference
+            df.at[index, 'live_price'] = price 
+            
             total_val += row_val
 
         return total_val, df
-
+    
     if not f_port_raw.empty:
         f_total, f_port = calculate_live_total(f_port_raw)
         if 'target_weight' in f_port.columns: 
@@ -3343,6 +3362,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
