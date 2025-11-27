@@ -488,17 +488,32 @@ def load_data():
         if 'target_weight' in q_port.columns: q_port = q_port.rename(columns={'target_weight': 'allocation'})
         if 'allocation' in q_port.columns: q_port['allocation'] = q_port['allocation'].apply(clean_float)
 
-    # 4. Process Members
+    # 4. Process Members & Calculate NAV (Unitized System)
     members_list = []
+    
+    # Defaults
+    total_units_fund = 0.0
+    total_units_quant = 0.0
+    nav_fund = 100.00 # Default Par Value if fund is empty
+    nav_quant = 100.00 # Default Par Value if fund is empty
+
     if not df_mem.empty:
         df_mem.columns = df_mem.columns.astype(str).str.strip()
         
+        # A. Sum Total Units Outstanding (The Denominator)
+        # Ensure we treat empty strings as 0
         total_units_fund = pd.to_numeric(df_mem.get('Units_Fund', 0), errors='coerce').fillna(0).sum()
         total_units_quant = pd.to_numeric(df_mem.get('Units_Quant', 0), errors='coerce').fillna(0).sum()
 
-        nav_fund = f_total / total_units_fund if total_units_fund > 0 else 100.00
-        nav_quant = q_total / total_units_quant if total_units_quant > 0 else 100.00
+        # B. Calculate Live NAV (Net Asset Value per Share)
+        # Logic: Total Assets / Total Shares
+        if total_units_fund > 0:
+            nav_fund = f_total / total_units_fund
         
+        if total_units_quant > 0:
+            nav_quant = q_total / total_units_quant
+
+        # C. Process Individual Member Equity
         ROLE_MAP = {
             'ab': {'r': 'Advisory Board', 'd': 'Advisory', 's': 'Board', 'admin': False},
             'qr': {'r': 'Quant Researcher', 'd': 'Quant', 's': 'Quant Research', 'admin': False},
@@ -509,23 +524,28 @@ def load_data():
             'ia': {'r': 'Investment Analyst', 'd': 'Fundamental', 's': 'Analyst Team', 'admin': False},
             'fm': {'r': 'Financial Manager', 'd': 'Board', 's': 'Financial Manager', 'admin': True},
             'pr': {'r': 'President', 'd': 'Board', 's': 'Management', 'admin': True},
-            'hb': { 'r': "Head of Business Development", 'd': 'Board', 's': 'Business Dev', 'admin': False},
+            'hb': {'r': "Head of Business Development", 'd': 'Board', 's': 'Business Dev', 'admin': False},
             'other': {'r': 'Member', 'd': 'General', 's': 'General', 'admin': False},
         }
 
         for _, row in df_mem.iterrows():
             role_code = str(row.get('Role', 'other')).strip().lower()
             role_data = ROLE_MAP.get(role_code, {'r': 'Member', 'd': 'General', 's': 'General', 'admin': False})
+            
             name = str(row.get('Name', 'Unknown')).strip()
             uname = name.lower().replace(" ", ".")
             email = str(row.get('Email', f"{uname}@tilburg.edu")).strip()
             
-            try: liq_val = int(float(row.get('Liq Pending', 0)))
-            except: liq_val = 0
-            
+            # Get Member's Units
             u_f = clean_float(row.get('Units_Fund', 0))
             u_q = clean_float(row.get('Units_Quant', 0))
+            
+            # CALCULATE DYNAMIC VALUE: (Units * NAV)
+            # This ensures if the portfolio goes up, their value goes up
             real_value = (u_f * nav_fund) + (u_q * nav_quant)
+            
+            try: liq_val = int(float(row.get('Liq Pending', 0)))
+            except: liq_val = 0
             
             last_active = str(row.get('Last Login', 'Never'))
             last_p = str(row.get('Last_Page', 'Launchpad'))
@@ -536,9 +556,10 @@ def load_data():
                 'admin': role_data.get('admin', False),
                 'status': 'Pending' if liq_val == 1 else 'Active', 'liq_pending': liq_val,
                 'contribution': clean_float(row.get('Initial Investment', 0)),
-                'value': real_value, 'units_fund': u_f, 'units_quant': u_q,
+                'value': real_value, # <--- This is now dynamically calculated
+                'units_fund': u_f,
+                'units_quant': u_q,
                 'last_login': last_active, 'last_page': last_p,
-                'contract_text': "TIC MEMBERSHIP..."
             })
         members = pd.DataFrame(members_list)
     else:
@@ -1755,21 +1776,41 @@ def render_admin_panel(user, members_df, f_port, q_port, f_total, q_total, propo
             except Exception as e:
                 st.error(f"Failed to save file: {e}. Is the file open in Excel?")
 
-    # --- TAB 2: TREASURY & LIQUIDATION ---
+    # --- TAB 2: TREASURY (UNITIZED SYSTEM) ---
     elif active_tab == "💰 Treasury":
-        with st.expander("💰 Process Capital Injection (Treasurer)"):
-            c_nav1, c_nav2 = st.columns(2)
-            c_nav1.metric("NAV Fundamental", f"€{nav_f:.2f}")
-            c_nav2.metric("NAV Quant", f"€{nav_q:.2f}")
-            
+        st.subheader("Fund Treasury (Unitized)")
+        st.caption("Issue new shares based on current Net Asset Value (NAV).")
+        
+        # Display Current NAV
+        c_nav1, c_nav2, c_nav3 = st.columns(3)
+        c_nav1.metric("NAV Fundamental", f"€{nav_f:.2f}")
+        c_nav2.metric("NAV Quant", f"€{nav_q:.2f}")
+        c_nav3.metric("Total AUM", f"€{f_total + q_total:,.2f}")
+        
+        st.divider()
+        
+        with st.expander("💰 Process Capital Injection (Buy Shares)", expanded=True):
             with st.form("issue_units"):
-                target_user = st.selectbox("Member", members_df['u'].tolist())
-                amount = st.number_input("Cash Injected (€)", min_value=0.0)
+                target_user = st.selectbox("Select Member", members_df['u'].tolist())
+                amount = st.number_input("Cash Injected (€)", min_value=0.0, step=50.0)
                 
                 # Treasurer chooses where the money goes
-                fund_choice = st.radio("Allocate to:", ["Fundamental", "Quant", "50/50 Split"])
+                fund_choice = st.radio("Allocate to:", ["Fundamental Fund", "Quant Fund", "50/50 Split"])
                 
-                if st.form_submit_button("Issue Units"):
+                # Live Preview of Units to be Issued
+                preview_f, preview_q = 0.0, 0.0
+                if amount > 0:
+                    if fund_choice == "Fundamental Fund":
+                        preview_f = amount / nav_f
+                    elif fund_choice == "Quant Fund":
+                        preview_q = amount / nav_q
+                    else: # 50/50
+                        preview_f = (amount * 0.5) / nav_f
+                        preview_q = (amount * 0.5) / nav_q
+                
+                st.info(f"Est. Issuance: {preview_f:.4f} Fund Units | {preview_q:.4f} Quant Units")
+                
+                if st.form_submit_button("✅ Issue Units & Update DB"):
                     client = init_connection()
                     sheet = client.open("TIC_Database_Master")
                     ws = sheet.worksheet("Members")
@@ -1777,36 +1818,38 @@ def render_admin_panel(user, members_df, f_port, q_port, f_total, q_total, propo
                     # Find user row
                     data = ws.get_all_records()
                     df = pd.DataFrame(data)
-                    df['u'] = df['Name'].astype(str).str.lower().str.strip().str.replace(' ', '.')
-                    idx = df.index[df['u'] == target_user].tolist()[0]
-                    row_num = idx + 2
+                    # Create matching column
+                    df['u_match'] = df['Name'].astype(str).str.lower().str.strip().str.replace(' ', '.')
                     
-                    # Calculate Units
-                    u_f_add = 0.0
-                    u_q_add = 0.0
-                    
-                    if fund_choice == "Fundamental":
-                        u_f_add = amount / nav_f
-                    elif fund_choice == "Quant":
-                        u_q_add = amount / nav_q
-                    else: # 50/50
-                        u_f_add = (amount * 0.5) / nav_f
-                        u_q_add = (amount * 0.5) / nav_q
-                    
-                    # Update Cells
-                    curr_f = float(df.iloc[idx]['Units_Fund']) if 'Units_Fund' in df.columns else 0.0
-                    curr_q = float(df.iloc[idx]['Units_Quant']) if 'Units_Quant' in df.columns else 0.0
-                    curr_inv = float(df.iloc[idx]['Initial Investment'])
-                    
-                    # We find column indices dynamically
-                    headers = ws.row_values(1)
-                    
-                    ws.update_cell(row_num, headers.index('Units_Fund')+1, curr_f + u_f_add)
-                    ws.update_cell(row_num, headers.index('Units_Quant')+1, curr_q + u_q_add)
-                    ws.update_cell(row_num, headers.index('Initial Investment')+1, curr_inv + amount)
-                    
-                    st.success(f"Issued: {u_f_add:.2f} Fund Units and {u_q_add:.2f} Quant Units.")
-                    st.cache_data.clear()
+                    try:
+                        # Gspread is 1-indexed, plus 1 for header = index + 2
+                        idx = df.index[df['u_match'] == target_user].tolist()[0]
+                        row_num = idx + 2
+                        
+                        # Get Header Indices dynamically
+                        headers = ws.row_values(1)
+                        col_fund = headers.index('Units_Fund') + 1
+                        col_quant = headers.index('Units_Quant') + 1
+                        col_inv = headers.index('Initial Investment') + 1
+                        
+                        # Get Current Values
+                        curr_f = float(df.iloc[idx]['Units_Fund']) if df.iloc[idx]['Units_Fund'] != '' else 0.0
+                        curr_q = float(df.iloc[idx]['Units_Quant']) if df.iloc[idx]['Units_Quant'] != '' else 0.0
+                        curr_inv = float(df.iloc[idx]['Initial Investment']) if df.iloc[idx]['Initial Investment'] != '' else 0.0
+                        
+                        # Update Cells
+                        ws.update_cell(row_num, col_fund, curr_f + preview_f)
+                        ws.update_cell(row_num, col_quant, curr_q + preview_q)
+                        ws.update_cell(row_num, col_inv, curr_inv + amount) # We track investment just for ROI calc
+                        
+                        st.success(f"Success! Issued {preview_f:.2f} Fund / {preview_q:.2f} Quant units to {target_user}.")
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"Error updating database: {e}")
+        
         st.subheader("Club Financials")
         c1, c2, c3 = st.columns(3)
         c1.metric("Cash Balance", "€12,450.00", "+€500")
@@ -3269,6 +3312,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
