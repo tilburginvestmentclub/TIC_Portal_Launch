@@ -3080,7 +3080,7 @@ def main():
                 else:
                     # Assume it's a ticker (e.g., "TSLA") -> Go to Research Page
                     st.session_state['previous_choice'] = "Stock Research"
-                    st.session_state['cli_ticker'] = cmd_input
+                    st.session_state['research_ticker'] = cmd_input
                     st.rerun()
         
         # TIC LOGO
@@ -3269,6 +3269,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
