@@ -416,7 +416,7 @@ def load_static_data():
 
     return results["Fundamentals"], results["Quant"], results["Members"], results["Events"]
 
-@st.cache_data(ttl=60) # Cache Live Data for 60 seconds
+@st.cache_data(ttl=120) # Cache Live Data for 120 seconds
 def load_dynamic_data():
     # Fetches Fast-Moving data (Messages, Votes, Attendance).
     # Also runs in parallel to minimize lag
@@ -3414,6 +3414,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
