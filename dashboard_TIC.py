@@ -617,88 +617,96 @@ def style_bloomberg_chart(fig):
     return fig
     
 @st.cache_data(ttl=3600)
-def fetch_stock_profile(ticker):
-    """Fetches the heavy 'info' dictionary with caching and retry logic."""
-    # Try up to 3 times
-    for attempt in range(3):
-        try:
-            data = yf.Ticker(ticker).info
-            # Basic validation: ensure we got something meaningful
-            if data and len(data) > 1: 
-                return data
-        except Exception:
-            # If it fails, wait a bit and try again (Exponential Backoff)
-            time.sleep(1 * (attempt + 1)) 
-            continue
-            
-    return {} # Return empty if all 3 attempts fail
-
-@st.cache_data(ttl=3600)
-def fetch_stock_financials(ticker):
-    """Fetches dataframes for statements with retry logic."""
-    for attempt in range(3):
-        try:
-            stock = yf.Ticker(ticker)
-            # Force fetch to ensure we catch errors here
-            inc = stock.financials
-            bal = stock.balance_sheet
-            cash = stock.cashflow
-            
-            # If we get at least one dataframe, return success
-            if not inc.empty or not bal.empty:
-                return inc, bal, cash
-                
-        except Exception:
-            time.sleep(1 * (attempt + 1))
-            continue
-            
-    return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-@st.cache_data(ttl=3600*12) # Cache for 12 hours
-def fetch_peer_data_safe(main_ticker, sector):
+def fetch_stock_bundle(ticker):
     """
-    Returns a dataframe of peers based on the sector.
-    Expands the list to ensure 'actual' relevant comparisons.
+    Optimized fetcher: Gets Info, Financials, and Price in one go.
+    Returns a dictionary to minimize individual API calls.
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        
+        # 1. Info (Heavy call)
+        info = stock.info
+        
+        # 2. Fast Fail check
+        if not info or 'regularMarketPrice' not in info:
+            # Try history as fallback to see if ticker exists
+            hist = stock.history(period="1d")
+            if hist.empty: return None
+
+        # 3. Financials (Lazy load - accessing them triggers the download)
+        financials = {
+            'inc': stock.financials,
+            'bal': stock.balance_sheet,
+            'cash': stock.cashflow
+        }
+        
+        return {'info': info, 'financials': financials}
+    except Exception as e:
+        print(f"Error fetching bundle for {ticker}: {e}")
+        return None
+
+@st.cache_data(ttl=3600*24)
+def fetch_peer_comparison_optimized(main_ticker, sector):
+    """
+    Optimized Peer Fetcher. 
+    Instead of fetching full .info for every peer (which kills rate limits),
+    we use a lighter approach or handle failures gracefully.
     """
     sec = str(sector)
     peers = []
     
-    # Expanded Sector Map
-    if "Technology" in sec: peers = ['MSFT', 'AAPL', 'NVDA', 'AMD', 'INTC', 'CRM', 'ORCL']
-    elif "Financial" in sec: peers = ['JPM', 'BAC', 'GS', 'MS', 'C', 'WFC', 'BLK']
-    elif "Energy" in sec: peers = ['XOM', 'CVX', 'SHEL', 'BP', 'TTE', 'COP']
-    elif "Healthcare" in sec: peers = ['LLY', 'JNJ', 'PFE', 'MRK', 'ABBV', 'TMO']
-    elif "Consumer" in sec: peers = ['AMZN', 'WMT', 'PG', 'KO', 'PEP', 'COST']
-    elif "Communication" in sec: peers = ['GOOGL', 'META', 'NFLX', 'DIS', 'TMUS']
-    elif "Industrial" in sec: peers = ['CAT', 'DE', 'HON', 'GE', 'LMT']
-    else: peers = ['SPY', 'QQQ', 'IWM'] # Fallback to indices
-    
-    # Ensure Main Ticker is included for comparison
+    # Simplified Peer Map (Reduced list size to save API calls)
+    if "Technology" in sec: peers = ['MSFT', 'AAPL', 'NVDA', 'AMD', 'ORCL']
+    elif "Financial" in sec: peers = ['JPM', 'BAC', 'GS', 'MS', 'BLK']
+    elif "Energy" in sec: peers = ['XOM', 'CVX', 'SHEL', 'BP']
+    elif "Healthcare" in sec: peers = ['LLY', 'JNJ', 'PFE', 'MRK']
+    elif "Consumer" in sec: peers = ['AMZN', 'WMT', 'PG', 'KO']
+    elif "Communication" in sec: peers = ['GOOGL', 'META', 'NFLX', 'DIS']
+    elif "Industrial" in sec: peers = ['CAT', 'DE', 'GE', 'LMT']
+    else: peers = ['SPY', 'QQQ'] 
+
     if main_ticker not in peers: peers.insert(0, main_ticker)
     
     peer_data = []
+    
+    # Batch download price history (Very fast, low API cost)
+    try:
+        prices_df = yf.download(peers, period="1d", progress=False)['Close']
+    except:
+        prices_df = pd.DataFrame()
+
     for p in peers:
         try:
-            # Quick fetch (reduced info to speed up loop)
+            # We skip the heavy .info call for peers to save API limits
+            # Instead, we rely on the batch price download + basic stats if needed
+            
+            # If you absolutely need P/E for peers, we must call .info
+            # We add a small sleep to be nice to the API
+            time.sleep(0.2) 
             stock = yf.Ticker(p)
             i = stock.info
             
-            # Skip if data is missing
-            if 'currentPrice' not in i: continue
-                
-            peer_data.append({
-                "Ticker": p,
-                "Price": i.get('currentPrice'),
-                "P/E": i.get('trailingPE'),
-                "Fwd P/E": i.get('forwardPE'),
-                "EV/EBITDA": i.get('enterpriseToEbitda'),
-                "P/B": i.get('priceToBook'),
-                "Margins": i.get('profitMargins')
-            })
-        except: continue
+            current_price = i.get('currentPrice')
             
-    return pd.DataFrame(peer_data)
-    
+            # Fallback if .info fails but batch price worked
+            if not current_price and not prices_df.empty and p in prices_df.columns:
+                current_price = float(prices_df[p].iloc[-1])
+
+            if current_price:
+                peer_data.append({
+                    "Ticker": p,
+                    "Price": current_price,
+                    "P/E": i.get('trailingPE', 0),
+                    "Fwd P/E": i.get('forwardPE', 0),
+                    "EV/EBITDA": i.get('enterpriseToEbitda', 0),
+                    "P/B": i.get('priceToBook', 0),
+                    "Margins": i.get('profitMargins', 0)
+                })
+        except Exception:
+            continue
+            
+    return pd.DataFrame(peer_data)    
 def add_calendar_event_gsheet(title, ticker, date_obj, type_str, audience):
     """Writes a new calendar event row to the Google Sheet 'Events' tab."""
     client = init_connection()
@@ -1336,131 +1344,120 @@ def render_voting_section(user, proposals, votes_df, target_dept):
                                 st.cache_data.clear()
                                 st.rerun()
                             
-def render_leaderboard(user, members_df):
-    st.title("🏆 Simulation Leaderboard")
-    st.caption("Ranking based on Paper Trading performance (Starting Capital: €100k).")
-    
-    # 1. Mock Competitors (Since we don't store everyone's shadow trades yet)
-    # In a full version, you'd save everyone's shadow portfolio to a DB.
-    competitors = [
-        {'Member': 'Alvise (Quant)', 'Equity': 118450.00},
-        {'Member': 'Senyo (Board)', 'Equity': 114200.00},
-        {'Member': 'Boaz (Alumni)', 'Equity': 109100.00},
-        {'Member': 'Chris (Fund)', 'Equity': 105500.00},
-        {'Member': 'Market (S&P 500)', 'Equity': 104200.00}, # Benchmark
-    ]
-    
-    # 2. Calculate CURRENT USER'S Shadow Value
-    # Default to 100k if not started
-    shadow_cash = st.session_state.get('shadow_cash', 100000.0)
-    shadow_holdings = st.session_state.get('shadow_holdings', {})
-    
-    # Calculate Equity Value of Holdings
-    shadow_equity = 0.0
-    if shadow_holdings:
-        tickers = list(shadow_holdings.keys())
-        # Fetch live prices for accurate valuation
-        prices = fetch_live_prices_with_change(tickers)
-        for t, units in shadow_holdings.items():
-            p = prices.get(t, {}).get('price', 0)
-            shadow_equity += units * p
-            
-    user_total = shadow_cash + shadow_equity
-    
-    # Add User to List
-    competitors.append({
-        'Member': f"{user['n']} (You)",
-        'Equity': user_total,
-        'Is_User': True
-    })
-    
-    # 3. Create DataFrame & Calculate Return
-    df = pd.DataFrame(competitors)
-    df['Return'] = ((df['Equity'] - 100000) / 100000) * 100
-    
-    # Sort (Highest Return First)
-    df = df.sort_values(by='Return', ascending=False).reset_index(drop=True)
-    df['Rank'] = df.index + 1
-    
-    # 4. Render
-    def highlight_user(row):
-        if row.get('Is_User', False):
-            return ['background-color: #D4AF37; color: black; font-weight: bold'] * len(row)
-        elif 'Market' in row['Member']:
-            return ['background-color: #262730; border: 1px solid white'] * len(row)
-        else:
-            return [''] * len(row)
-
-    st.dataframe(
-        df[['Rank', 'Member', 'Return', 'Equity']].style.apply(highlight_user, axis=1).format({
-            'Return': "{:+.2f}%", 
-            'Equity': "€{:,.0f}"
-        }),
-        use_container_width=True,
-        hide_index=True,
-        height=400
-    )
 def render_stock_research():
-    st.title("🔎 Equity Research Terminal (DES)")
+    st.title("🔎 Equity Research Terminal")
+    st.caption("Real-time fundamental data analysis.")
     
-    col_input, col_status = st.columns([1, 4])
-    with col_input:
-        default_ticker = st.session_state.get('cli_ticker', 'NVDA')
-        ticker = st.text_input("SECURITY >", value=default_ticker).upper()
-    
+    # 1. Search Bar (Session State managed)
+    if 'research_ticker' not in st.session_state:
+        st.session_state['research_ticker'] = 'NVDA'
+
+    c_search, c_btn = st.columns([4, 1])
+    with c_search:
+        ticker_input = st.text_input("Enter Ticker", value=st.session_state['research_ticker'], label_visibility="collapsed").upper()
+    with c_btn:
+        if st.button("Analyze", type="primary", use_container_width=True):
+            st.session_state['research_ticker'] = ticker_input
+            
+    ticker = st.session_state['research_ticker']
     if not ticker: return
 
-    try:
-        # 1. Fetch Main Data
-        stock = yf.Ticker(ticker)
-        info = stock.info
+    # 2. Fetch Data (Using Bundle)
+    with st.spinner(f"Pulling Bloomberg terminal data for {ticker}..."):
+        data_bundle = fetch_stock_bundle(ticker)
         
-        # Header Stats
-        st.markdown(f"""
-        **{info.get('shortName', ticker)}** | {info.get('sector', 'N/A')} | {info.get('industry', 'N/A')}
-        Price: **{info.get('currentPrice', 0.0)}** | Mkt Cap: **{info.get('marketCap', 0)/1e9:.2f}B** | Beta: **{info.get('beta', 0.0)}**
-        """)
+    if not data_bundle:
+        st.error(f"Could not load data for {ticker}. Check spelling or API limits.")
+        return
+
+    info = data_bundle['info']
+    fins = data_bundle['financials']
+
+    # 3. UI: Header Metrics
+    with st.container(border=True):
+        c1, c2, c3, c4 = st.columns(4)
         
-        t1, t2, t3 = st.tabs(["DES (Profile)", "FA (Financials)", "RV (Peers)"])
+        # Safe Getters
+        curr_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+        prev_close = info.get('previousClose', curr_price)
+        delta = curr_price - prev_close
+        delta_pct = (delta / prev_close) * 100 if prev_close else 0
+        
+        mkt_cap = info.get('marketCap', 0)
+        mkt_cap_fmt = f"${mkt_cap/1e12:.2f}T" if mkt_cap > 1e12 else f"${mkt_cap/1e9:.2f}B"
+        
+        c1.metric(f"{info.get('shortName', ticker)}", f"{curr_price}", f"{delta:.2f} ({delta_pct:.2f}%)")
+        c2.metric("Market Cap", mkt_cap_fmt)
+        c3.metric("Sector", info.get('sector', 'N/A'))
+        c4.metric("Beta", f"{info.get('beta', 0):.2f}")
 
-    # --- TAB 1: DESCRIPTION ---
-        with t1:
-            c1, c2 = st.columns([2, 1])
-            c1.markdown("### Business Summary")
-            c1.write(info.get('longBusinessSummary', 'No data.'))
-            c2.markdown("### Key Ratios")
-            metrics = {
-                "P/E": info.get('trailingPE'), "Fwd P/E": info.get('forwardPE'),
-                "PEG": info.get('pegRatio'), "P/B": info.get('priceToBook'),
-                "Div Yield": f"{info.get('dividendYield', 0)*100:.2f}%"
-            }
-            c2.table(pd.DataFrame(metrics.items(), columns=["Metric", "Value"]))
+    # 4. Tabs for Details
+    t1, t2, t3 = st.tabs(["📋 Profile & Ratios", "📊 Financials", "⚖️ Peer Comps"])
 
-        with t2:
-            st.subheader("Financial Statements")
-            statement_type = st.radio("Statement:", ["Income", "Balance Sheet", "Cash Flow"], horizontal=True)
-            if statement_type == "Income": st.dataframe(stock.financials.T, use_container_width=True)
-            elif statement_type == "Balance Sheet": st.dataframe(stock.balance_sheet.T, use_container_width=True)
-            else: st.dataframe(stock.cashflow.T, use_container_width=True)
+    with t1:
+        col_prof, col_kpi = st.columns([1, 2])
+        
+        with col_prof:
+            st.markdown("##### Business Summary")
+            with st.container(border=True):
+                st.caption(info.get('longBusinessSummary', 'No description available.'))
+                st.divider()
+                st.write(f"**Industry:** {info.get('industry', 'N/A')}")
+                st.write(f"**Employees:** {info.get('fullTimeEmployees', 0):,}")
+                st.write(f"**City:** {info.get('city', 'N/A')}")
 
-        # --- UPDATED TAB 3: ACTUAL PEERS ---
-        with t3:
-            st.subheader("Relative Valuation (Sector Peers)")
-            st.caption(f"Comp set based on sector: {info.get('sector', 'Unknown')}")
+        with col_kpi:
+            st.markdown("##### Key Valuation Metrics")
+            k1, k2, k3 = st.columns(3)
             
-            # CALL THE HELPER
-            df_peers = fetch_peer_data_safe(ticker, info.get('sector', ''))
+            with k1:
+                with st.container(border=True):
+                    st.metric("Trailing P/E", f"{info.get('trailingPE', 0):.1f}")
+                    st.metric("Forward P/E", f"{info.get('forwardPE', 0):.1f}")
+            with k2:
+                with st.container(border=True):
+                    st.metric("PEG Ratio", f"{info.get('pegRatio', 0):.2f}")
+                    st.metric("Price / Book", f"{info.get('priceToBook', 0):.2f}")
+            with k3:
+                with st.container(border=True):
+                    st.metric("Div Yield", f"{info.get('dividendYield', 0)*100:.2f}%" if info.get('dividendYield') else "N/A")
+                    st.metric("Profit Margin", f"{info.get('profitMargins', 0)*100:.1f}%")
+
+    with t2:
+        st.subheader("Financial Statements")
+        type_select = st.radio("Select View:", ["Income Statement", "Balance Sheet", "Cash Flow"], horizontal=True, label_visibility="collapsed")
+        
+        df_show = pd.DataFrame()
+        if type_select == "Income Statement": df_show = fins['inc']
+        elif type_select == "Balance Sheet": df_show = fins['bal']
+        else: df_show = fins['cash']
+        
+        if not df_show.empty:
+            st.dataframe(df_show, use_container_width=True, height=500)
+        else:
+            st.warning("Financial data unavailable.")
+
+    with t3:
+        st.subheader("Relative Valuation")
+        if st.button("Load Peer Comparison"):
+            with st.spinner("Fetching peer data (this may take a moment)..."):
+                df_peers = fetch_peer_comparison_optimized(ticker, info.get('sector', ''))
             
             if not df_peers.empty:
+                # Format the dataframe for better readability
                 st.dataframe(
-                    df_peers.set_index("Ticker").style.highlight_max(axis=0, color='#1e3d1e').format("{:.2f}"),
+                    df_peers.set_index("Ticker").style.highlight_max(axis=0, color='#1e3d1e').format({
+                        "Price": "${:.2f}",
+                        "P/E": "{:.1f}",
+                        "Fwd P/E": "{:.1f}",
+                        "Margins": "{:.1%}"
+                    }),
                     use_container_width=True
                 )
             else:
-                st.warning("Could not fetch peer data.")
-
-    except Exception as e:
-        st.error(f"Error loading ticker: {e}")
+                st.warning("Could not load peer data.")
+        else:
+            st.info("Click the button above to load peer data (saves API usage).")
             
 def render_valuation_sandbox():
     st.title("🧮 Valuation Sandbox (DCF)")
@@ -2379,58 +2376,6 @@ def render_offboarding(user):
                     else:
                         st.error("❌ Update failed. Database error.")
             
-def render_simulation(user):
-    st.title("🎮 Paper Trading Simulation")
-    if 'shadow_cash' not in st.session_state: st.session_state['shadow_cash'] = 100000.0
-    if 'shadow_holdings' not in st.session_state: st.session_state['shadow_holdings'] = {}
-
-    cash = st.session_state['shadow_cash']
-    holdings = st.session_state['shadow_holdings']
-    prices = fetch_live_prices(list(holdings.keys())) if holdings else {}
-    equity = sum([u * prices.get(t,0) for t,u in holdings.items()])
-    
-    with st.container(border=True):
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Portfolio Value", f"€{cash+equity:,.2f}")
-        c2.metric("Cash Available", f"€{cash:,.2f}")
-        c3.metric("Equity Value", f"€{equity:,.2f}")
-
-    st.markdown("### Trading Desk")
-    c_trade, c_hold = st.columns([1, 2])
-    
-    with c_trade:
-        with st.container(border=True):
-            st.subheader("New Order")
-            with st.form("trade"):
-                t = st.text_input("Ticker (e.g. TSLA)").upper()
-                act = st.selectbox("Side", ["BUY", "SELL"])
-                u = st.number_input("Units", 1)
-                if st.form_submit_button("Execute Order", type="primary"):
-                    p = fetch_live_prices([t]).get(t, 100)
-                    cost = p * u
-                    if act == "BUY":
-                        if cash >= cost:
-                            st.session_state['shadow_cash'] -= cost
-                            st.session_state['shadow_holdings'][t] = holdings.get(t, 0) + u
-                            st.success(f"Bought {u} @ {p}")
-                            st.rerun()
-                        else: st.error("Insufficient Cash")
-                    elif act == "SELL":
-                        if holdings.get(t, 0) >= u:
-                            st.session_state['shadow_cash'] += cost
-                            st.session_state['shadow_holdings'][t] -= u
-                            if st.session_state['shadow_holdings'][t] == 0: del st.session_state['shadow_holdings'][t]
-                            st.success(f"Sold {u} @ {p}")
-                            st.rerun()
-                        else: st.error("Insufficient Position")
-
-    with c_hold:
-        with st.container(border=True):
-            st.subheader("Current Positions")
-            if holdings:
-                df = pd.DataFrame([{'Ticker':t, 'Units':u, 'Price':prices.get(t,0), 'Value':u*prices.get(t,0)} for t,u in holdings.items()])
-                st.dataframe(df, use_container_width=True, hide_index=True)
-            else: st.caption("Your portfolio is empty. Start trading.")
 
 def render_risk_macro_dashboard(f_port, q_port):
     st.title("⚠️ Risk & Macro Observatory")
@@ -3130,10 +3075,6 @@ def main():
                 elif cmd_input in ["SETTINGS", "SETT"]:
                     st.session_state['previous_choice'] = "Settings"
                     st.rerun()
-                
-                elif cmd_input in ["SIM", "SIMULATION"]:
-                    st.session_state['previous_choice'] = "Simulation"
-                    st.rerun()    
                     
                 # 2. Ticker Lookup (Default behavior)
                 else:
@@ -3172,7 +3113,7 @@ def main():
         # Create dynamic label
         inbox_label = f"Inbox ({unread_count})" if unread_count > 0 else "Inbox"
         
-        menu = ["Simulation", inbox_label, "Library", "Calendar", "Settings"] 
+        menu = [inbox_label, "Library", "Calendar", "Settings"] 
 
         # Board AND Advisory Board AND Dept Heads see Dashboards
         if user['d'] in ['Fundamental', 'Quant', 'Board', 'Advisory'] or user.get('r') == 'Guest':
@@ -3285,10 +3226,6 @@ def main():
     elif "Risk & Macro" in nav: render_risk_macro_dashboard(f_port, q_port)
     elif nav == "Valuation Tool": render_valuation_sandbox()
     elif nav == "Stock Research": render_stock_research()
-    elif nav == "Simulation": 
-        t_sim, t_lead = st.tabs(["🎮 Trade", "🏆 Leaderboard"])
-        with t_sim: render_simulation(user)
-        with t_lead: render_leaderboard(user, members) 
     elif nav == "Calendar": render_calendar_view(user, calendar_events)
     elif "Inbox" in nav: 
         # GUEST OVERRIDE
@@ -3332,6 +3269,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
