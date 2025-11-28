@@ -421,41 +421,82 @@ def fetch_real_benchmark_data(portfolio_df):
 
     return df_chart.dropna().reset_index().rename(columns={'index':'Date'})
     
-@st.cache_data(ttl=1800) # Cache Heavy Data for 30 mins
+@st.cache_data(ttl=1800)
 def load_static_data():
-    # Fetches Portfolios and Members in PARALLEL.
+    """
+    Fetches Portfolios and Members using STAGGERED PARALLELISM.
+    Fast, but polite to the API.
+    """
     client = init_connection()
-    if not client: return None, None, None, None
+    if not client: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
 
     sheets_to_fetch = ["Fundamentals", "Quant", "Members", "Events"]
     results = {}
-
+    
+    # We use a ThreadPool to run downloads at the same time
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        future_to_sheet = {executor.submit(_fetch_single_sheet, client, name): name for name in sheets_to_fetch}
-        for future in concurrent.futures.as_completed(future_to_sheet):
-            sheet_name = future_to_sheet[future]
-            results[sheet_name] = future.result()
+        future_map = {}
+        
+        for name in sheets_to_fetch:
+            # Submit the task
+            future = executor.submit(_fetch_single_sheet, client, name)
+            future_map[future] = name
+            
+            # --- THE FIX: SMALL DELAY ---
+            # Wait 200ms before starting the next download.
+            # This prevents 4 hits hitting Google at the exact same millisecond.
+            time.sleep(0.2) 
+            # ----------------------------
 
-    return results["Fundamentals"], results["Quant"], results["Members"], results["Events"]
+        # Collect results as they finish
+        for future in concurrent.futures.as_completed(future_map):
+            name = future_map[future]
+            try:
+                results[name] = future.result()
+            except Exception as e:
+                # print(f"Failed to load {name}: {e}")
+                results[name] = pd.DataFrame()
 
-@st.cache_data(ttl=120) # Cache Live Data for 120 seconds
+    # Ensure we return safe defaults if a sheet failed
+    return (
+        results.get("Fundamentals", pd.DataFrame()), 
+        results.get("Quant", pd.DataFrame()), 
+        results.get("Members", pd.DataFrame()), 
+        results.get("Events", [])
+    )
+
+@st.cache_data(ttl=60)
 def load_dynamic_data():
-    # Fetches Fast-Moving data (Messages, Votes, Attendance).
-    # Also runs in parallel to minimize lag
+    """
+    Fetches dynamic data using STAGGERED PARALLELISM.
+    """
     client = init_connection()
-    if not client: return None, None, None, None
+    if not client: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     sheets_to_fetch = ["Messages", "Proposals", "Votes", "Attendance"]
     results = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        future_to_sheet = {executor.submit(_fetch_single_sheet, client, name): name for name in sheets_to_fetch}
-        for future in concurrent.futures.as_completed(future_to_sheet):
-            sheet_name = future_to_sheet[future]
-            results[sheet_name] = future.result()
+        future_map = {}
+        for name in sheets_to_fetch:
+            future = executor.submit(_fetch_single_sheet, client, name)
+            future_map[future] = name
+            time.sleep(0.2) # Stagger
 
-    return results["Messages"], results["Proposals"], results["Votes"], results["Attendance"]
+        for future in concurrent.futures.as_completed(future_map):
+            name = future_map[future]
+            try:
+                results[name] = future.result()
+            except Exception:
+                results[name] = pd.DataFrame()
 
+    return (
+        results.get("Messages", pd.DataFrame()), 
+        results.get("Proposals", pd.DataFrame()), 
+        results.get("Votes", pd.DataFrame()), 
+        results.get("Attendance", pd.DataFrame())
+    )
+    
 def load_data():
     # Master Load Function: Combines Static and Dynamic data
     # 1. Fetch Data (Parallelized & Split)
@@ -3571,6 +3612,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
