@@ -2062,10 +2062,11 @@ def render_admin_panel(user, members_df, f_port, q_port, f_total, q_total, propo
         st.divider()
         
         # ==========================================
-        # 1. DEPOSIT APPROVAL QUEUE (NEW)
+        # 1. DEPOSIT APPROVAL QUEUE 
         # ==========================================
         st.subheader("📥 Incoming Capital (Deposit Queue)")
-        
+        if 'deposit_pending' not in members_df.columns:
+            members_df['deposit_pending'] = 0.0
         # Filter users who have a pending deposit > 0
         deposit_requests = members_df[members_df['deposit_pending'] > 0].copy()
         
@@ -3498,6 +3499,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
