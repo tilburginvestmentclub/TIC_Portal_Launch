@@ -16,6 +16,7 @@ import streamlit.components.v1 as components
 import time
 import threading
 import concurrent.futures
+import hashlib
 
 # --- GOOGLE SHEETS CONNECTION SETUP ---
 SCOPES = [
@@ -741,6 +742,27 @@ def load_data():
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
+def make_hash(password):
+    """Converts a plain password into a SHA-256 hash."""
+    return hashlib.sha256(str(password).encode('utf-8')).hexdigest()
+
+def check_password(plain_password, stored_password):
+    """
+    Checks validity.
+    Returns: (is_valid, needs_upgrade)
+    """
+    stored_password = str(stored_password).strip()
+    
+    # 1. Check if input matches the stored value exactly (Legacy Plain Text)
+    if plain_password == stored_password:
+        return True, True # Valid, but needs to be hashed
+        
+    # 2. Check if input's hash matches stored value (Secure)
+    if make_hash(plain_password) == stored_password:
+        return True, False # Valid and already secure
+        
+    return False, False
+    
 @st.cache_data(ttl=3600*12)
 def fetch_simulated_history(f_port, q_port):
     """
@@ -1185,9 +1207,32 @@ def update_member_fields_in_gsheet_bulk(usernames, updates_dict):
         return False
         
 def authenticate(username, password, df):
-    user = df[(df['u'] == username) & (df['p'] == password)]
-    return user.iloc[0] if not user.empty else None
-
+    # 1. Find the user row by Username ONLY
+    user_rows = df[df['u'] == username]
+    
+    if user_rows.empty:
+        return None
+        
+    user = user_rows.iloc[0]
+    stored_pwd = user['p']
+    
+    # 2. Verify Password using helper
+    is_valid, needs_upgrade = check_password(password, stored_pwd)
+    
+    if is_valid:
+        if needs_upgrade:
+            # SECURITY UPGRADE: Convert plain text to hash in the background
+            new_hash = make_hash(password)
+            print(f"Migrating user {username} to secure hash...")
+            threading.Thread(
+                target=update_member_field_in_gsheet,
+                args=(username, "Password", new_hash)
+            ).start()
+            
+        return user
+        
+    return None
+    
 class PDFReport(FPDF):
     def header(self):
         # Brand Color Line (Gold)
@@ -1409,12 +1454,8 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
     # 3. QUANT VIEW (Data-Driven)
     # ==========================================
     if user['d'] == 'Quant':
-        active_models = 0
+        active_models = 2
         top_asset = "N/A"
-        
-        if not q_port.empty:
-            if 'model_id' in q_port.columns:
-                active_models = q_port['model_id'].nunique()
             
             # Ensure market_value is numeric for sorting
             q_port['mv_numeric'] = pd.to_numeric(q_port['market_value'], errors='coerce').fillna(0)
@@ -2673,19 +2714,24 @@ def render_offboarding(user):
             
             if st.form_submit_button("Update Password", type="primary"):
                 # Validation
-                if current_p != user['p']:
-                    st.error("❌ Incorrect current password.")
+                # Note: We use check_password here too to verify the OLD password
+                valid_old, _ = check_password(current_p, user['p'])
+                
+                if not valid_old:
+                     st.error("❌ Incorrect current password.")
                 elif new_p1 != new_p2:
                     st.error("❌ New passwords do not match.")
                 elif len(new_p1) < 4:
                     st.warning("⚠️ Password is too short (min 4 chars).")
                 else:
-                    # Save to Google Sheet
-                    if update_member_field_in_gsheet(user['u'], "Password", new_p1):
+                    # --- CHANGE IS HERE: HASH THE NEW PASSWORD ---
+                    secure_hash = make_hash(new_p1)
+                    
+                    # Save the HASH, not the plain text
+                    if update_member_field_in_gsheet(user['u'], "Password", secure_hash):
                         st.success("✅ Password updated successfully!")
                         st.info("Logging you out to re-authenticate...")
                         
-                        # --- FORCE LOGOUT SEQUENCE ---
                         time.sleep(2)
                         st.session_state.clear()
                         st.rerun()
@@ -3499,6 +3545,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
