@@ -1454,8 +1454,21 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
     # 3. QUANT VIEW (Data-Driven)
     # ==========================================
     if user['d'] == 'Quant':
-        active_models = 2
+        active_models = 0
         top_asset = "N/A"
+        
+        if not q_port.empty:
+            if 'model_id' in q_port.columns:
+                active_models = 2
+                
+            q_port['mv_numeric'] = pd.to_numeric(q_port['market_value'], errors='coerce').fillna(0)
+            
+            if not q_port.empty:
+                top_row = q_port.sort_values('mv_numeric', ascending=False).iloc[0]
+                
+                # Safe access to allocation
+                alloc = pd.to_numeric(top_row.get('allocation', 0), errors='coerce') * 100
+                top_asset = f"{top_row.get('ticker', 'N/A')} ({alloc:.1f}%)"if user['d'] == 'Quant':
             
             # Ensure market_value is numeric for sorting
             q_port['mv_numeric'] = pd.to_numeric(q_port['market_value'], errors='coerce').fillna(0)
@@ -3545,6 +3558,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
