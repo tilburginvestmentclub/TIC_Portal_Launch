@@ -1302,7 +1302,7 @@ def create_enhanced_pdf_report(f_port, q_port, f_total, q_total, nav_f, nav_q, r
 def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calendar_events):
     """
     Role-Based Homepage with REAL Data Connections.
-    FIXED: Added type conversion to prevent math errors on string data.
+    Fixed: strictly enforces scalar floats for AUM Delta to prevent crashes.
     """
     # 1. Dynamic Greeting
     h = datetime.now().hour
@@ -1312,6 +1312,8 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
     
     st.title(f"🚀 {greeting}, {user['n']}")
     st.caption(f"Logged in as: {user['r']} | Department: {user['d']}")
+    
+    # --- GUEST WELCOME MESSAGE ---
     if user.get('r') == 'Guest':
         st.info(
             "**Welcome to the Tilburg Investment Club portal.**\n\n"
@@ -1319,10 +1321,73 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
             "**Note:** As a guest, you have read-only access. Voting and trading features are disabled.",
             icon="👋"
         )
+
+    # =========================================================
+    # NEW: CALCULATE TOTAL AUM CHANGE (DELTA)
+    # =========================================================
+    total_delta_eur = 0.0
+    
+    try:
+        # 1. Gather all unique tickers
+        all_tickers = []
+        if not f_port.empty and 'ticker' in f_port.columns:
+            all_tickers += f_port['ticker'].dropna().unique().tolist()
+        
+        q_col = 'model_id' if not q_port.empty and 'model_id' in q_port.columns else 'ticker'
+        if not q_port.empty and q_col in q_port.columns:
+            all_tickers += q_port[q_col].dropna().unique().tolist()
+            
+        # 2. Fetch live data
+        if all_tickers:
+            clean_tickers = [str(t) for t in all_tickers if str(t).upper() not in ['NAN', 'NONE', '']]
+            live_data = fetch_live_prices_with_change(list(set(clean_tickers)))
+            
+            # 3. Helper: Returns a plain float
+            def calc_row_delta(row, ticker_col_name):
+                try:
+                    t = str(row.get(ticker_col_name, ''))
+                    pct_change = live_data.get(t, {}).get('pct', 0.0)
+                    
+                    # Clean currency formatting
+                    raw_mv = str(row.get('market_value', 0)).replace(',', '').replace('€', '')
+                    current_val = float(raw_mv)
+                    
+                    if current_val != 0:
+                        prev_val = current_val / (1 + (pct_change / 100.0))
+                        return current_val - prev_val
+                    return 0.0
+                except Exception:
+                    return 0.0
+
+            # 4. Sum with type safety
+            if not f_port.empty:
+                # Calculate series of deltas
+                f_deltas = f_port.apply(lambda x: calc_row_delta(x, 'ticker'), axis=1)
+                # Sum and force to python float (handle numpy/pandas types)
+                val = f_deltas.sum()
+                if hasattr(val, 'item'): val = val.item()
+                total_delta_eur += float(val)
+                
+            if not q_port.empty:
+                q_deltas = q_port.apply(lambda x: calc_row_delta(x, q_col), axis=1)
+                val = q_deltas.sum()
+                if hasattr(val, 'item'): val = val.item()
+                total_delta_eur += float(val)
+
+    except Exception as e:
+        print(f"Delta Calc Error: {e}")
+        total_delta_eur = 0.0
+
+    # =========================================================
+
     # 2. Global Ticker (Mini)
     c1, c2, c3, c4 = st.columns(4)
-    # Calc (short for calculator) Total TIC AUM + TOP DIFF
-    safe_delta = float(total_delta_eur)
+    
+    # Final Safety Check before render
+    try:
+        safe_delta = float(total_delta_eur)
+    except:
+        safe_delta = 0.0
     
     c1.metric(
         "TIC Total AUM", 
@@ -3377,6 +3442,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
