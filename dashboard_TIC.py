@@ -1420,7 +1420,7 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
         c4.metric("Quant NAV", f"€{nav_q:.2f}")
         
         st.divider()
-        st.subheader("🏛️ Board Overview")
+        st.subheader("🏛️ Cash Balance")
         
         cash_total = 0.0
         
@@ -3370,6 +3370,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
