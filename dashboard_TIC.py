@@ -451,7 +451,7 @@ def load_dynamic_data():
     client = init_connection()
     if not client: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    sheets_to_fetch = ["Messages", "Proposals", "Votes", "Attendance"]
+    sheets_to_fetch = ["Proposals", "Votes", "Attendance"]
     results = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
@@ -701,12 +701,7 @@ def load_data():
     else:
         members = pd.DataFrame([{'u': 'admin', 'p': 'pass', 'n': 'Offline Admin', 'r': 'Admin', 'd': 'Board', 'admin': True, 'value': 0}])
 
-    # 5. Process Messages
-    if not msgs.empty: 
-        msgs.columns = msgs.columns.str.lower()
-        messages = msgs.to_dict('records')
-    
-    # 6. Process Events
+    # 5. Process Events
     manual_events = []
     if not evts.empty:
         evts['Date'] = pd.to_datetime(evts['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
@@ -725,7 +720,7 @@ def load_data():
     
     full_calendar = real_events + manual_events
 
-    # 7. Process Proposals & Votes
+    # 6. Process Proposals & Votes
     if not df_props.empty:
         df_props['ID'] = df_props['ID'].astype(str)
         proposals = df_props.to_dict('records')
@@ -733,12 +728,12 @@ def load_data():
     if not df_votes.empty:
         df_votes['Proposal_ID'] = df_votes['Proposal_ID'].astype(str)
 
-    # 8. Process Attendance
+    # 7. Process Attendance
     att = att_raw
     if not att.empty and 'Date' in att.columns:
         att['Date'] = pd.to_datetime(att['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
 
-    return members, f_port, q_port, messages, proposals, full_calendar, f_total, q_total, df_votes, nav_fund, nav_quant, att
+    return members, f_port, q_port, proposals, full_calendar, f_total, q_total, df_votes, nav_fund, nav_quant, att
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
@@ -1049,42 +1044,7 @@ def save_attendance_log(date_str, attendance_data):
     except Exception as e:
         st.error(f"Attendance save failed: {e}")
         return False
-        
-def mark_message_read_gsheet(message_id, username):
-    """Appends username to the 'Read' column for a specific message."""
-    client = init_connection()
-    if not client: return False
-    
-    try:
-        sheet = client.open("TIC_Database_Master")
-        ws = sheet.worksheet("Messages")
-        
-        # 1. Find the Row by ID (Column 1)
-        cell = ws.find(str(message_id), in_column=1)
-        
-        if cell:
-            # 2. Get current 'Read' value (Column 7 based on your structure)
-            # We assume ID, Date, From, To, Subj, Body, READ
-            read_col_index = 7 
-            current_val = ws.cell(cell.row, read_col_index).value
-            
-            # 3. Check if already read
-            if not current_val:
-                new_val = username
-            elif username not in current_val:
-                new_val = f"{current_val}, {username}"
-            else:
-                return True # Already read
-            
-            # 4. Update
-            ws.update_cell(cell.row, read_col_index, new_val)
-            st.cache_data.clear()
-            return True
-        return False
-    except Exception as e:
-        st.error(f"Read mark failed: {e}")
-        return False
-        
+                
 def cast_vote_gsheet(proposal_id, username, vote_choice):
     """Records a YES/NO vote in the 'Votes' tab."""
     client = init_connection()
@@ -1175,31 +1135,6 @@ def update_member_field_in_gsheet(username, field_name, new_value):
         st.error(f"GSheet Update Error: {e}")
         return False
         
-def send_new_message_gsheet(from_user, to_user, subject, body):
-    """Appends a new message row to the 'Messages' tab."""
-    client = init_connection()
-    if not client: return False
-    
-    try:
-        sheet = client.open("TIC_Database_Master")
-        ws = sheet.worksheet("Messages")
-        
-        new_row = [
-            int(datetime.now().timestamp()), # ID
-            datetime.now().strftime("%Y-%m-%d %H:%M"), # Timestamp
-            from_user,
-            to_user,
-            subject,
-            body,
-            "False" # Read
-        ]
-        
-        ws.append_row(new_row)
-        return True
-    except Exception as e:
-        st.error(f"Message send failed: {e}")
-        return False    
-
 def update_member_fields_in_gsheet_bulk(usernames, updates_dict):
     """
     Batch update: Downloads sheet, modifies multiple rows in Pandas, overwrites sheet.
@@ -1361,27 +1296,6 @@ def create_enhanced_pdf_report(f_port, q_port, f_total, q_total, nav_f, nav_q, r
     
     return pdf.output(dest='S').encode('latin-1')
     
-def send_new_message(from_user, to_user, subject, body):
-    file_path = "data/TIC_Messages.xlsx"
-    
-    new_data = {
-        'ID': int(datetime.now().timestamp()), # Simple unique ID
-        'Timestamp': datetime.now().strftime("%Y-%m-%d %H:%M"),
-        'From_User': from_user,
-        'To_User': to_user,
-        'Subject': subject,
-        'Body': body,
-        'Read': False
-    }
-    
-    if os.path.exists(file_path):
-        df = pd.read_excel(file_path, engine='openpyxl')
-        # Append new row
-        df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
-        df.to_excel(file_path, index=False)
-        return True
-    return False
-
 # ==========================================
 # 4. VIEW COMPONENTS
 # ==========================================
@@ -1398,7 +1312,13 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
     
     st.title(f"🚀 {greeting}, {user['n']}")
     st.caption(f"Logged in as: {user['r']} | Department: {user['d']}")
-    
+    if user.get('r') == 'Guest':
+        st.info(
+            "**Welcome to the Tilburg Investment Club portal.**\n\n"
+            "Feel free to explore our dashboards, risk models, and library.\n\n"
+            "**Note:** As a guest, you have read-only access. Voting and trading features are disabled.",
+            icon="👋"
+        )
     # 2. Global Ticker (Mini)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("TIC Total AUM", f"€{f_total + q_total:,.0f}")
@@ -3082,114 +3002,6 @@ def render_quant_dashboard(user, portfolio, proposals):
         c2.metric("Worst Case (5%)", f"{np.percentile(final_vals, 5):.0f}")
         c3.metric("Best Case (95%)", f"{np.percentile(final_vals, 95):.0f}")
         
-def render_inbox(user, messages, all_members_df):
-    # --- 1. FILTER MESSAGES FOR CURRENT USER ---
-    my_msgs = [
-        m for m in messages 
-        if m['to_user'] == user['u'] 
-        or m['to_user'] == 'all'
-        or m['to_user'] == user['d']
-    ]
-    
-    # Calculate Unread Count logic
-    unread_count = 0
-    for m in my_msgs:
-        read_list = str(m.get('read', ''))
-        if user['u'] not in read_list:
-            unread_count += 1
-
-    # Title with Badge
-    if unread_count > 0:
-        st.title(f"📬 Inbox ({unread_count})")
-    else:
-        st.title("📬 Inbox")
-
-    # --- 2. BOARD/ADMIN: COMPOSE SECTION ---
-    if user.get('admin', False):
-        with st.expander("✍️ Compose Message (Board Only)", expanded=False):
-            with st.form("send_msg"):
-                # 1. Special Broadcast Groups
-                options = ["ALL MEMBERS", "Quant Team", "Fundamental Team"]
-                # 2. Add individual users
-                individual_users = all_members_df['u'].tolist()
-                options += individual_users
-                
-                target = st.selectbox("To:", options)
-                subj = st.text_input("Subject")
-                body = st.text_area("Message")
-                
-                if st.form_submit_button("Send Message"):
-                    # Map friendly names to system codes
-                    if target == "ALL MEMBERS": final_target = "all"
-                    elif target == "Quant Team": final_target = "Quant"
-                    elif target == "Fundamental Team": final_target = "Fundamental"
-                    else: final_target = target
-                    
-                    # CALL THE GOOGLE SHEET HELPER
-                    if send_new_message_gsheet(user['u'], final_target, subj, body):
-                        st.success("Message Sent!")
-                        st.cache_data.clear() # Clear cache to show new message immediately
-                        st.rerun()
-                    else:
-                        st.error("Could not write to database.")
-
-    st.divider()
-
-    # --- 3. VIEW MESSAGES ---
-    # Sort by date (newest first). We assume ID is incremental or timestamp based
-    my_msgs.sort(key=lambda x: str(x.get('timestamp', '')), reverse=True)
-    
-    if not my_msgs: 
-        st.info("No messages in your inbox.")
-        return
-
-    for m in my_msgs:
-        # Check Read Status for THIS user
-        read_str = str(m.get('read', ''))
-        is_read = user['u'] in read_str
-        
-        # Visual distinction for Broadcasts vs Direct
-        is_broadcast = (m['to_user'] in ['all', 'Quant', 'Fundamental'])
-        
-        # Dynamic Styling
-        border_style = "1px solid #D4AF37" if not is_read else "1px solid rgba(49, 51, 63, 0.2)"
-        bg_color = "rgba(212, 175, 55, 0.1)" if not is_read else "transparent"
-        
-        # Icon Logic
-        if not is_read:
-            icon = "✉️" # Unread
-        elif is_broadcast:
-            icon = "📢" # Read Broadcast
-        else:
-            icon = "📩" # Read Direct
-        
-        # Render Message Card
-        with st.container():
-            st.markdown(
-                f"""
-                <div style="border: {border_style}; background-color: {bg_color}; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
-                    <div style="display:flex; justify-content:space-between;">
-                        <span style="font-weight:bold; font-size:1.1em;">{icon} {m.get('subject','No Subject')}</span>
-                        <span style="font-size:0.8em; opacity:0.7;">{m.get('timestamp','')}</span>
-                    </div>
-                    <div style="font-size:0.9em; opacity:0.8; margin-bottom:5px;">
-                        From: <b>{m.get('from_user')}</b> | To: {m.get('to_user')}
-                    </div>
-                    <hr style="margin: 5px 0; opacity: 0.2;">
-                    <div style="margin-top: 10px; white-space: pre-wrap;">{m.get('body','')}</div>
-                </div>
-                """, 
-                unsafe_allow_html=True
-            )
-            
-            # Mark as Read Button (Only show if currently unread)
-            if not is_read:
-                if st.button("Mark as Read", key=f"read_{m.get('id')}"):
-                    if mark_message_read_gsheet(m.get('id'), user['u']):
-                        # FIX: Set flag so main() knows to keep us here
-                        st.session_state['stay_on_inbox'] = True
-                        st.rerun()
-
 def render_documents(user):
     st.title("📚 Library")
     t1, t2 = st.tabs(["Contract", "Archive"])
@@ -3252,7 +3064,7 @@ def main():
     if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
     
     # Unpack everything
-    members, f_port, q_port, msgs, props, calendar_events, f_total, q_total, df_votes, nav_f, nav_q, att_df = load_data()
+    members, f_port, q_port, props, calendar_events, f_total, q_total, df_votes, nav_f, nav_q, att_df = load_data()
 
     if not st.session_state['logged_in']:
         c1, c2, c3 = st.columns([1,1.5,1])
@@ -3427,31 +3239,15 @@ def main():
             st.caption(f"Fund: €{(u_f*nav_f):,.0f} | Quant: €{(u_q*nav_q):,.0f}")
 
         st.divider()
-        
-        user_msgs = [m for m in msgs if m['to_user'] in [user['u'], 'all', user['d']]]
-        unread_count = sum(1 for m in user_msgs if user['u'] not in str(m.get('read', '')))
-        
-        # Create dynamic label
-        inbox_label = f"Inbox ({unread_count})" if unread_count > 0 else "Inbox"
-        
-        menu = [inbox_label, "Library", "Calendar", "Settings"] 
-
-        # Board AND Advisory Board AND Dept Heads see Dashboards
-        if user['d'] in ['Fundamental', 'Quant', 'Board', 'Advisory'] or user.get('r') == 'Guest':
-            menu.insert(0, "Risk & Macro")
-            menu.insert(0, "Dashboard")
+        menu = ["Launchpad","Dashboard", "Stock Research", "Risk & Macro", "Library", "Calendar", "Settings"] 
             
         # Fundamental Specific Tools
         if user['d'] in ['Fundamental', 'Board', 'Advisory'] or user.get('r') == 'Guest':
             menu.insert(3, "Valuation Tool")
 
-        menu.insert(2, "Stock Research")
-
         # Only show Admin Panel if user has admin=True
         if user.get('admin', False):
             menu.append("Admin Panel")
-
-        menu.insert(0, "Launchpad")
         
         # 2. Determine the Correct Index (Priority: Session > Saved DB > Default)
         default_index = 0
@@ -3548,22 +3344,6 @@ def main():
     elif nav == "Valuation Tool": render_valuation_sandbox()
     elif nav == "Stock Research": render_stock_research()
     elif nav == "Calendar": render_calendar_view(user, calendar_events)
-    elif "Inbox" in nav: 
-        # GUEST OVERRIDE
-        if user['r'] == 'Guest':
-            # Create a fake message list just for this session
-            guest_msgs = [{
-                'id': 9999,
-                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M"),
-                'from_user': 'System',
-                'to_user': 'guest',
-                'subject': 'Welcome to TIC Portal!',
-                'body': 'Welcome to the Tilburg Investment Club portal.\n\nFeel free to explore our dashboards, risk models, and library.\n\nNote: As a guest, you have read-only access. Voting and trading features are disabled.',
-                'read': 'guest' # Already read
-            }]
-            render_inbox(user, guest_msgs, members)
-        else:
-            render_inbox(user, msgs, members)
     elif nav == "Library": render_documents(user)
     elif nav == "Settings": render_offboarding(user)
     elif nav == "Admin Panel": render_admin_panel(user, members, f_port, q_port, f_total, q_total, props, df_votes, nav_f, nav_q, att_df)
@@ -3590,6 +3370,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
