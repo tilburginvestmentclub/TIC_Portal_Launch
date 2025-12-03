@@ -84,7 +84,10 @@ st.markdown("""
             padding-top: 3rem; 
             padding-bottom: 2rem;
         }
-        
+        /* FIX SIDEBAR SCROLLING: Reduces bottom whitespace */
+        section[data-testid="stSidebar"] .block-container {
+            padding-bottom: 1rem !important;
+        }
         /* NEWS CARD STYLE */
         .news-item {
             padding: 10px;
@@ -2933,7 +2936,7 @@ def render_fundamental_dashboard(user, portfolio, proposals):
         
         # Bloomberg Style
         fig = style_bloomberg_chart(fig)
-        fig.update_layout(yaxis_title="Rebased (100)", legend_title=None)
+        fig.update_layout(title="Portfolio Performance History", yaxis_title="Rebased (100)", legend_title=None)
         
         # RENDER CHART INSIDE THE IF BLOCK
         st.plotly_chart(fig, use_container_width=True)
@@ -3489,6 +3492,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
