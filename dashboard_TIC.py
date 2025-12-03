@@ -160,6 +160,69 @@ def fetch_macro_news():
         return []
     return news_items
 
+
+def render_onboarding_tour(user):
+    """
+    Displays a welcome guide for new users. 
+    Updates the database to 'Onboarded=1' when finished.
+    """
+    st.title(f"👋 Welcome to TIC Portal, {user['n']}!")
+    st.subheader("Let's get you set up in 3 steps.")
+    
+    # We use a multi-step container approach
+    step = st.radio("Tour Steps:", ["1. The Dashboard", "2. Voting", "3. Your Profile"], horizontal=True, label_visibility="collapsed")
+    
+    st.divider()
+
+    if "1." in step:
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.info("📊 **Real-Time Data**")
+            st.markdown("""
+            The **Dashboard** is your home base. 
+            - See the Fund's live NAV.
+            - Check your personal stake performance.
+            - View the top holdings in real-time.
+            """)
+        with c2:
+            st.caption("Preview")
+            st.bar_chart({"Fund": 100, "You": 120}) # Simple dummy viz
+
+    elif "2." in step:
+        st.warning("🗳️ **Democracy in Action**")
+        st.markdown("""
+        As a member, you have voting rights.
+        - Go to the **Dashboard** to see active proposals.
+        - Click **YES** or **NO** to cast your vote.
+        - Votes are recorded instantly on the blockchain (Google Sheets).
+        """)
+        st.button("Vote YES (Demo)", disabled=True)
+        st.button("Vote NO (Demo)", disabled=True)
+
+    elif "3." in step:
+        st.success("👤 **Manage Your Assets**")
+        st.markdown("""
+        Go to **Settings** to:
+        - Change your password (Recommended!).
+        - Request to deposit more capital.
+        - Download your signed contracts.
+        """)
+
+    st.divider()
+    
+    col_fin = st.columns([3, 1])
+    with col_fin[1]:
+        if st.button("🚀 Get Started", type="primary", use_container_width=True):
+            with st.spinner("Setting up your profile..."):
+                # 1. Update Google Sheet
+                update_member_field_in_gsheet(user['u'], "Onboarded", 1)
+                
+                # 2. Update Session State (so we don't need a full reload)
+                st.session_state['user']['onboarded'] = 1
+                
+                # 3. Refresh
+                st.rerun()
+
 @st.cache_data(ttl=3600)
 def fetch_macro_data():
     """Pulls real macro indicators using YFinance"""
@@ -695,6 +758,9 @@ def load_data():
             
             last_active = str(row.get('Last Login', 'Never'))
             last_p = str(row.get('Last_Page', 'Launchpad'))
+            
+            try: is_onboarded = int(float(row.get('Onboarded', 0)))
+            except: is_onboarded = 0
 
             members_list.append({
                 'u': uname, 'p': str(row.get('Password', 'pass')).strip(), 'n': name, 'email': email,
@@ -706,7 +772,7 @@ def load_data():
                 'value': real_value, # <--- This is now dynamically calculated
                 'units_fund': u_f,
                 'units_quant': u_q,
-                'last_login': last_active, 'last_page': last_p,
+                'last_login': last_active, 'last_page': last_p, 'onboarded': is_onboarded
             })
         members = pd.DataFrame(members_list)
     else:
@@ -3250,7 +3316,9 @@ def main():
             # --- END LOGIN FORM ---
         return
     user = st.session_state['user']
-    
+    if user.get('r') != 'Guest' and user.get('onboarded', 0) == 0:
+        render_onboarding_tour(user)
+        return
     # ==========================================
     # FETCH PRICES FOR TAPE (Assets & FX Rates)
     # ==========================================
@@ -3489,6 +3557,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
