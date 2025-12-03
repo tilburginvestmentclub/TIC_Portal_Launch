@@ -768,7 +768,8 @@ def check_password(plain_password, stored_password):
         return True, False # Valid and already secure
         
     return False, False
-    @st.cache_data(ttl=3600*12)
+
+@st.cache_data(ttl=3600*12)
 def fetch_simulated_history(f_port, q_port):
     """
     TEMPORARY DEMO MODE:
@@ -3488,6 +3489,7 @@ def main():
         """)
 if __name__ == "__main__":
     main()
+
 
 
 
