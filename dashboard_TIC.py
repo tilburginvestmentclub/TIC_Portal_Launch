@@ -160,9 +160,9 @@ def check_credentials_live(user_email, user_password):
         records = ws.get_all_records() # List of dicts
         
         # --- DEBUG: UNCOMMENT THE LINES BELOW IF IT STILL FAILS ---
-        # st.write(f"Found {len(records)} rows in Sheet.")
-        # if len(records) > 0:
-        #    st.write(f"Columns found: {list(records[0].keys())}")
+        st.write(f"Found {len(records)} rows in Sheet.")
+        if len(records) > 0:
+            st.write(f"Columns found: {list(records[0].keys())}")
         # ----------------------------------------------------------
 
         # 3. Prepare Inputs (Clean & Hash)
