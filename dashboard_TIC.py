@@ -1116,71 +1116,50 @@ def run_monte_carlo(current_nav, volatility, years=1, simulations=1000):
         
     return paths
 
-@st.cache_data(ttl=3600*12)
+@st.cache_data(ttl=300) # Short cache (5 min) because reading a local file is fast
 def fetch_simulated_history(f_port, q_port):
     """
-    TEMPORARY DEMO MODE:
-    Fetches real S&P 500 data, then generates a synthetic 'TIC Fund' curve
-    that follows the S&P 500 trend with added random noise/alpha.
+    Reads the pre-calculated unitized history from 'history.json'.
+    This is extremely fast because data_loader.py did the heavy lifting.
     """
-    # 1. Setup Dates
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=180)
-    
+    # 1. Load the pre-calculated history
     try:
-        # 2. Fetch ONLY the Benchmark (Reliable)
-        data = yf.download('^GSPC', start=start_date, end=end_date, progress=False)
+        with open("history.json", "r") as f:
+            raw_data = json.load(f)
         
-        # Handle yfinance structure
-        if 'Close' in data.columns:
-            spy = data['Close']
-        else:
-            spy = data
-            
-        if isinstance(spy, pd.DataFrame):
-            spy = spy.squeeze()
+        df_hist = pd.DataFrame(raw_data)
+        if df_hist.empty: return pd.DataFrame()
+        
+        df_hist['Date'] = pd.to_datetime(df_hist['Date'])
+    except Exception:
+        return pd.DataFrame() # Return empty if file missing
 
+    # 2. Fetch Benchmark (S&P 500) for the same range
+    # We still fetch this live to keep it fresh, but it's only one ticker.
+    try:
+        start_date = df_hist['Date'].iloc[0]
+        end_date = df_hist['Date'].iloc[-1]
+        
+        spy = yf.download('^GSPC', start=start_date, end=end_date, progress=False)['Close']
+        if isinstance(spy, pd.DataFrame): spy = spy.squeeze()
         spy = spy.dropna()
         
-        if spy.empty:
-            raise ValueError("No SPY data")
+        # Align Dates
+        spy = spy.reindex(df_hist['Date'], method='ffill')
+        
+        # Normalize SPY to start at 100
+        spy_start = spy.iloc[0]
+        if pd.isna(spy_start) or spy_start == 0: spy_start = 1
+        
+        df_hist['SP500'] = (spy.values / spy_start) * 100
+        
+        # Rename NAV column to match what the chart expects
+        df_hist['TIC_Fund'] = df_hist['NAV']
+        
+    except Exception:
+        df_hist['SP500'] = 100.0 
 
-        # 3. Create Benchmark Curve (Normalized to 100)
-        spy_curve = (spy / spy.iloc[0]) * 100
-        
-        # 4. Create Synthetic Portfolio Curve
-        days = len(spy_curve)
-        
-        # --- THE FIX IS HERE ---
-        # Changed mean from 0 to 0.0004. 
-        # This adds ~0.04% daily "alpha", resulting in a ~5% beat over 6 months.
-        noise = np.random.normal(0.0004, 0.008, days)
-        
-        cumulative_drift = np.cumprod(1 + noise)
-        
-        # Apply drift to SPY curve
-        tic_curve_raw = spy_curve * cumulative_drift
-        
-        # Re-normalize TIC curve so it definitely starts at 100
-        tic_curve = (tic_curve_raw / tic_curve_raw.iloc[0]) * 100
-
-        # 5. Build DataFrame
-        df_chart = pd.DataFrame({
-            'Date': spy_curve.index,
-            'SP500': spy_curve.values,
-            'TIC_Fund': tic_curve.values
-        })
-        
-        return df_chart.reset_index(drop=True)
-
-    except Exception as e:
-        # Fallback
-        dates = pd.date_range(start=start_date, end=end_date, freq='B')
-        return pd.DataFrame({
-            'Date': dates, 
-            'SP500': 100.0, 
-            'TIC_Fund': 100.0
-        })
+    return df_hist[['Date', 'SP500', 'TIC_Fund']]
         
 def style_bloomberg_chart(fig):
     """
