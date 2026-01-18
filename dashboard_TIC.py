@@ -2115,7 +2115,7 @@ def render_stock_research():
             st.info("Click the button above to load peer data (saves API usage).")
             
 def render_valuation_sandbox():
-    st.title("💎 Professional DCF Model")
+    st.title("DCF Model")
     st.caption("Discounted Cash Flow Analysis // Intrinsic Value Calculator")
 
     # --- 1. SETTINGS & DATA FETCHING ---
@@ -2132,13 +2132,8 @@ def render_valuation_sandbox():
         if c_fetch.button("📥 Auto-Fill Data"):
             with st.spinner(f"Pulling financials for {ticker}..."):
                 try:
-                    # FIX: Spoof a real browser to bypass Yahoo Rate Limiting
-                    session = requests.Session()
-                    session.headers.update({
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                    })
-                    
-                    stock = yf.Ticker(ticker, session=session)
+                    # FIX: Reverted to standard call as requested by the error message
+                    stock = yf.Ticker(ticker)
                     info = stock.info
                     
                     # specific yfinance keys can be flaky, so we use .get with safe defaults
@@ -2153,10 +2148,9 @@ def render_valuation_sandbox():
                         'beta': info.get('beta', 1.0)
                     }
                     st.success("Data Loaded!")
-                    
                 except Exception as e:
-                    # Graceful Error Handling
-                    if "Too Many Requests" in str(e) or "429" in str(e):
+                    # Graceful Error Handling for Rate Limits
+                    if "429" in str(e) or "Too Many Requests" in str(e):
                         st.warning("⚠️ Yahoo Finance is currently rate-limiting this server. Please input the numbers manually.")
                     else:
                         st.error(f"Could not fetch data: {e}")
