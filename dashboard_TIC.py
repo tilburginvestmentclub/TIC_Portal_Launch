@@ -2177,7 +2177,7 @@ def render_valuation_sandbox():
         tv_method = st.radio("Method", ["Perpetual Growth", "Exit Multiple (EBITDA)"], horizontal=True)
         
         if tv_method == "Perpetual Growth":
-            term_val_input = st.number_input("Terminal Growth %", value=0.025, step=0.001, format="%.2f%%")
+            term_val_input = st.number_input("Terminal Growth %", value=0.025, step=0.001, format="%.4f")
             term_label = "L.T. Growth"
         else:
             term_val_input = st.number_input("Exit Multiple (x)", value=15.0, step=0.5)
