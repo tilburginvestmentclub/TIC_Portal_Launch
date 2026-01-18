@@ -21,6 +21,7 @@ import json
 import extra_streamlit_components as stx
 from scipy.stats import norm
 import toml
+import requests
 
 
 # --- GOOGLE SHEETS CONNECTION SETUP ---
@@ -2114,7 +2115,7 @@ def render_stock_research():
             st.info("Click the button above to load peer data (saves API usage).")
             
 def render_valuation_sandbox():
-    st.title("DCF Model")
+    st.title("💎 Professional DCF Model")
     st.caption("Discounted Cash Flow Analysis // Intrinsic Value Calculator")
 
     # --- 1. SETTINGS & DATA FETCHING ---
@@ -2122,7 +2123,7 @@ def render_valuation_sandbox():
         c_tic, c_fetch, c_dummy = st.columns([1, 1, 3])
         ticker = c_tic.text_input("Ticker", value="MSFT").upper()
         
-        # Initialize Session State for inputs if they don't exist
+        # Initialize Session State
         if 'dcf_inputs' not in st.session_state:
             st.session_state['dcf_inputs'] = {
                 'fcf': 10.0, 'shares': 1.0, 'cash': 5.0, 'debt': 2.0, 'beta': 1.0
@@ -2131,7 +2132,13 @@ def render_valuation_sandbox():
         if c_fetch.button("📥 Auto-Fill Data"):
             with st.spinner(f"Pulling financials for {ticker}..."):
                 try:
-                    stock = yf.Ticker(ticker)
+                    # FIX: Spoof a real browser to bypass Yahoo Rate Limiting
+                    session = requests.Session()
+                    session.headers.update({
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    })
+                    
+                    stock = yf.Ticker(ticker, session=session)
                     info = stock.info
                     
                     # specific yfinance keys can be flaky, so we use .get with safe defaults
@@ -2146,13 +2153,18 @@ def render_valuation_sandbox():
                         'beta': info.get('beta', 1.0)
                     }
                     st.success("Data Loaded!")
+                    
                 except Exception as e:
-                    st.error(f"Could not fetch data: {e}")
+                    # Graceful Error Handling
+                    if "Too Many Requests" in str(e) or "429" in str(e):
+                        st.warning("⚠️ Yahoo Finance is currently rate-limiting this server. Please input the numbers manually.")
+                    else:
+                        st.error(f"Could not fetch data: {e}")
 
-        # Unpack values for readability
+        # Unpack values
         defaults = st.session_state['dcf_inputs']
 
-    # --- 2. MODEL INPUTS (Split into logical sections) ---
+    # --- 2. MODEL INPUTS ---
     col_drivers, col_wacc, col_term = st.columns(3)
     
     with col_drivers:
@@ -2163,10 +2175,8 @@ def render_valuation_sandbox():
 
     with col_wacc:
         st.subheader("2. Discount Rate (WACC)")
-        # Simple CAPM Builder
-        rf_rate = 0.042 # 4.2% Risk Free
-        mkt_prem = 0.055 # 5.5% Market Premium
-        
+        rf_rate = 0.042 
+        mkt_prem = 0.055 
         calc_wacc = rf_rate + (defaults['beta'] * mkt_prem)
         
         wacc_input = st.number_input("WACC (Decimal)", value=calc_wacc, min_value=0.03, max_value=0.20, step=0.001, format="%.4f")
@@ -2177,16 +2187,15 @@ def render_valuation_sandbox():
         tv_method = st.radio("Method", ["Perpetual Growth", "Exit Multiple (EBITDA)"], horizontal=True)
         
         if tv_method == "Perpetual Growth":
-            term_val_input = st.number_input("Terminal Growth %", value=0.025, step=0.001, format="%.4f")
+            term_val_input = st.number_input("Terminal Growth (Decimal)", value=0.025, step=0.001, format="%.4f")
             term_label = "L.T. Growth"
         else:
-            term_val_input = st.number_input("Exit Multiple (x)", value=15.0, step=0.5)
+            term_val_input = st.number_input("Exit Multiple (x)", value=15.0, step=0.5, format="%.1f")
             term_label = "Exit Multiple"
 
     st.divider()
 
     # --- 3. CALCULATION ENGINE ---
-    # Projection Arrays
     years = range(1, 11)
     fcf_proj = []
     discount_factors = []
@@ -2195,36 +2204,27 @@ def render_valuation_sandbox():
     current_fcf = fcf_base
     
     for i in years:
-        # Determine growth rate for this year
         g = growth_1_5 if i <= 5 else growth_6_10
         current_fcf = current_fcf * (1 + g)
-        
-        # Discount Factor
         df = (1 + wacc_input) ** i
-        
         fcf_proj.append(current_fcf)
         discount_factors.append(df)
         pv_fcf.append(current_fcf / df)
 
     sum_pv_fcf = sum(pv_fcf)
     
-    # Terminal Value Calc
     if tv_method == "Perpetual Growth":
-        # Gordon Growth: FCF_11 / (WACC - g)
         fcf_11 = current_fcf * (1 + term_val_input)
         tv_raw = fcf_11 / (wacc_input - term_val_input)
     else:
-        # Exit Multiple: Apply multiple to Year 10 FCF (Proxy for EBITDA here for simplicity, or keep as FCF multiple)
         tv_raw = current_fcf * term_val_input
         
     pv_tv = tv_raw / ((1 + wacc_input) ** 10)
     
     enterprise_value = sum_pv_fcf + pv_tv
-    
-    # Equity Bridge
     equity_value = enterprise_value + float(defaults['cash']) - float(defaults['debt'])
     shares_out = float(defaults['shares'])
-    if shares_out == 0: shares_out = 1 # Avoid div/0
+    if shares_out == 0: shares_out = 1 
     
     target_price = equity_value / shares_out
 
@@ -2252,7 +2252,6 @@ def render_valuation_sandbox():
             st.write(f"= Equity Value: **${equity_value:.2f}**")
 
     with c_chart:
-        # Visualization: FCF Ramp
         df_plot = pd.DataFrame({
             "Year": [f"Y{y}" for y in years],
             "Projected FCF": fcf_proj,
@@ -2271,9 +2270,8 @@ def render_valuation_sandbox():
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # --- 5. SENSITIVITY ANALYSIS (Bottom) ---
+    # --- 5. SENSITIVITY ANALYSIS ---
     with st.expander("🌡️ Sensitivity Matrix (Price vs Assumptions)", expanded=True):
-        # Generate Ranges
         wacc_range = [wacc_input - 0.01, wacc_input - 0.005, wacc_input, wacc_input + 0.005, wacc_input + 0.01]
         
         if tv_method == "Perpetual Growth":
@@ -2289,15 +2287,11 @@ def render_valuation_sandbox():
         for w in wacc_range:
             row = []
             for t in term_range:
-                # Recalculate Logic (Simplified for matrix)
-                # Note: In a real app, refactor the calculation into a helper function to avoid code dup
-                _pv_sum = sum([f / ((1+w)**i) for i, f in zip(years, fcf_proj)]) # Approx: uses same growth vector
-                
+                _pv_sum = sum([f / ((1+w)**i) for i, f in zip(years, fcf_proj)]) 
                 if tv_method == "Perpetual Growth":
                     _tv = (fcf_proj[-1]*(1+t)) / (w-t)
                 else:
                     _tv = fcf_proj[-1] * t
-                    
                 _pv_tv = _tv / ((1+w)**10)
                 _eq_val = _pv_sum + _pv_tv + float(defaults['cash']) - float(defaults['debt'])
                 row.append(_eq_val / shares_out)
