@@ -18,6 +18,9 @@ import threading
 import concurrent.futures
 import hashlib
 import json
+import extra_streamlit_components as stx
+from scipy.stats import norm
+
 
 # --- GOOGLE SHEETS CONNECTION SETUP ---
 SCOPES = [
@@ -213,7 +216,7 @@ def render_onboarding_tour(user):
     
     col_fin = st.columns([3, 1])
     with col_fin[1]:
-        if st.button("🚀 Get Started", type="primary", use_container_width=True):
+        if st.button("🚀 Get Started", type="primary", width="stretch"):
             with st.spinner("Setting up your profile..."):
                 # 1. Update Google Sheet
                 update_member_field_in_gsheet(user['u'], "Onboarded", 1)
@@ -244,42 +247,55 @@ def fetch_macro_data():
         return {k: {'value': 0, 'delta': 0} for k in tickers}
     return macro_data
 
-@st.cache_data(ttl=3600*12) # Cache for 12 hours since earnings dates don't change often
+def fetch_single_calendar_event(t):
+    """Helper: Fetches one ticker's earnings date (runs in parallel)."""
+    try:
+        if not isinstance(t, str): return None
+        
+        # Fast initialization
+        stock = yf.Ticker(t)
+        cal = stock.calendar
+        
+        if cal and 'Earnings Date' in cal:
+            dates = cal['Earnings Date']
+            if dates:
+                next_date = dates[0]
+                # Only keep future dates
+                if next_date >= date.today():
+                    return {
+                        'title': f"{t} Earnings",
+                        'ticker': t,
+                        'date': next_date.strftime('%Y-%m-%d'),
+                        'type': 'market',
+                        'audience': 'all'
+                    }
+    except Exception:
+        return None
+    return None
+
+@st.cache_data(ttl=3600*12) 
 def fetch_company_events(tickers):
-    """Fetches upcoming earnings dates for a list of tickers."""
-    events = []
-    # Limit to top 15 tickers to prevent app timeout during loading
-    safe_tickers = tickers[:15] if tickers else []
+    """Fetches upcoming earnings for a list of tickers using MULTITHREADING."""
+    if not tickers: return []
     
-    for t in safe_tickers:
-        try:
-            if not isinstance(t, str): continue
-            
-            # Fetch calendar data
-            stock = yf.Ticker(t)
-            cal = stock.calendar
-            
-            # yfinance returns a dict where 'Earnings Date' is a list of dates
-            # We look for the 'Earnings Date' key
-            if cal and 'Earnings Date' in cal:
-                dates = cal['Earnings Date']
-                if dates:
-                    # Get the next scheduled date (usually index 0)
-                    next_date = dates[0]
-                    
-                    # Ensure we only show future or very recent events
-                    if next_date >= date.today():
-                        events.append({
-                            'title': f"{t} Earnings",
-                            'ticker': t,
-                            'date': next_date.strftime('%Y-%m-%d'),
-                            'type': 'market',
-                            'audience': 'all'
-                        })
-        except Exception:
-            # Silently fail for individual tickers if data is missing
-            continue
-            
+    events = []
+    # Limit to 20 tickers to stay safe, remove bad values
+    safe_tickers = [str(t) for t in tickers[:20] if str(t).upper() not in ['NAN', 'NONE', '']]
+    
+    # Run 10 requests at the same time (Parallel)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # Submit tasks
+        futures = {executor.submit(fetch_single_calendar_event, t): t for t in safe_tickers}
+        
+        # Collect results as they finish
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                result = future.result()
+                if result:
+                    events.append(result)
+            except Exception:
+                continue
+                
     return events
 
 @st.cache_data(ttl=3600*24)
@@ -413,94 +429,65 @@ def fetch_real_benchmark_data(portfolio_df):
         df_chart['TIC_Fund'] = 100.0
 
     return df_chart.dropna().reset_index().rename(columns={'index':'Date'})
-    
-@st.cache_data(ttl=1800)
-def load_static_data():
-    """
-    Fetches Portfolios and Members using STAGGERED PARALLELISM.
-    Fast, but polite to the API.
-    """
-    client = init_connection()
-    if not client: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
 
-    sheets_to_fetch = ["Fundamentals", "Quant", "Members", "Events"]
-    results = {}
+def get_snapshot_data():
+    """Reads the local JSON database snapshot."""
+    DB_FILE = "database_snapshot.json"
+    if not os.path.exists(DB_FILE):
+        return {}
+    try:
+        with open(DB_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def json_to_df(raw_data):
+    """Converts list of lists (from JSON) back to DataFrame."""
+    if not raw_data or len(raw_data) < 2:
+        return pd.DataFrame()
     
-    # We use a ThreadPool to run downloads at the same time
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        future_map = {}
+    headers = raw_data[0]
+    rows = raw_data[1:]
+    return pd.DataFrame(rows, columns=headers)
+
+@st.cache_data(ttl=5) # Re-check file every 5s
+def load_all_local_data():
+    """Loads all data from disk instantly."""
+    snap = get_snapshot_data()
+    
+    # Helper to safely get a DF
+    def get_df(key):
+        return json_to_df(snap.get(key, []))
         
-        for name in sheets_to_fetch:
-            # Submit the task
-            future = executor.submit(_fetch_single_sheet, client, name)
-            future_map[future] = name
-            
-            # --- THE FIX: SMALL DELAY ---
-            # Wait 200ms before starting the next download.
-            # This prevents 4 hits hitting Google at the exact same millisecond.
-            time.sleep(0.2) 
-            # ----------------------------
-
-        # Collect results as they finish
-        for future in concurrent.futures.as_completed(future_map):
-            name = future_map[future]
-            try:
-                results[name] = future.result()
-            except Exception as e:
-                # print(f"Failed to load {name}: {e}")
-                results[name] = pd.DataFrame()
-
-    # Ensure we return safe defaults if a sheet failed
-    return (
-        results.get("Fundamentals", pd.DataFrame()), 
-        results.get("Quant", pd.DataFrame()), 
-        results.get("Members", pd.DataFrame()), 
-        results.get("Events", [])
-    )
-
-@st.cache_data(ttl=60)
-def load_dynamic_data():
-    """
-    Fetches dynamic data using STAGGERED PARALLELISM.
-    """
-    client = init_connection()
-    if not client: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    sheets_to_fetch = ["Proposals", "Votes", "Attendance"]
-    results = {}
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        future_map = {}
-        for name in sheets_to_fetch:
-            future = executor.submit(_fetch_single_sheet, client, name)
-            future_map[future] = name
-            time.sleep(0.2) # Stagger
-
-        for future in concurrent.futures.as_completed(future_map):
-            name = future_map[future]
-            try:
-                results[name] = future.result()
-            except Exception:
-                results[name] = pd.DataFrame()
-
-    return (
-        results.get("Messages", pd.DataFrame()), 
-        results.get("Proposals", pd.DataFrame()), 
-        results.get("Votes", pd.DataFrame()), 
-        results.get("Attendance", pd.DataFrame())
-    )
+    f_port = get_df("Fundamentals")
+    q_port = get_df("Quant")
+    members = get_df("Members")
+    events = get_df("Events")
+    proposals = get_df("Proposals")
+    votes = get_df("Votes")
+    attendance = get_df("Attendance")
+    expenses = get_df("Expenses")
+    market_events = snap.get("Market_Events", [])
+    
+    return f_port, q_port, members, events, proposals, votes, attendance, expenses, market_events
     
 def load_data():
-    # Master Load Function: Combines Static and Dynamic data
-    # 1. Fetch Data (Parallelized & Split)
-    f_port_raw, q_port_raw, df_mem, evts = load_static_data()
-    msgs, df_props, df_votes, att_raw = load_dynamic_data()
+    # 1. LOAD FROM LOCAL DISK
+    f_port_raw, q_port_raw, df_mem, evts_raw, df_props, df_votes, att_raw, expenses_df, market_events_raw = load_all_local_data()
+    evts = evts_raw
     # 2. Initialize Defaults
     members = pd.DataFrame()
     f_port = pd.DataFrame(); q_port = pd.DataFrame()
     messages = []; proposals = []; full_calendar = []
     f_total = 0.0; q_total = 0.0
     nav_fund = 100.00; nav_quant = 100.00
+
+    total_liabilities = 0.0
+    if not expenses_df.empty and 'Amount' in expenses_df.columns:
+        # Convert to numbers, coerce errors to 0
+        expenses_df['Amount'] = pd.to_numeric(expenses_df['Amount'], errors='coerce').fillna(0.0)
+        # Sum up all costs
+        total_liabilities = expenses_df['Amount'].sum()
 
     # 3. Process Portfolios (Calculations)
     def clean_float(val):
@@ -658,12 +645,27 @@ def load_data():
         total_units_quant = pd.to_numeric(df_mem.get('Units_Quant', 0), errors='coerce').fillna(0).sum()
 
         # B. Calculate Live NAV (Net Asset Value per Share)
-        # Logic: Total Assets / Total Shares
+        # We split the bill proportional to AUM
+        total_assets = f_total + q_total
+        
+        if total_assets > 0:
+            f_share = f_total / total_assets
+            q_share = q_total / total_assets
+        else:
+            f_share, q_share = 0.5, 0.5
+
+        # Net Value = (Assets - Share of Liabilities)
+        net_f_total = f_total - (total_liabilities * f_share)
+        net_q_total = q_total - (total_liabilities * q_share)
+
         if total_units_fund > 0:
-            nav_fund = f_total / total_units_fund
+            nav_fund = net_f_total / total_units_fund
         
         if total_units_quant > 0:
-            nav_quant = q_total / total_units_quant
+            nav_quant = net_q_total / total_units_quant
+        
+        f_total = net_f_total
+        q_total = net_q_total
 
         # C. Process Individual Member Equity
         ROLE_MAP = {
@@ -728,20 +730,17 @@ def load_data():
 
     # 5. Process Events
     manual_events = []
-    if not evts.empty:
-        evts['Date'] = pd.to_datetime(evts['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-        for _, row in evts.iterrows():
+    if not evts_raw.empty:
+        # (Keep your existing manual event logic here)
+        evts_raw['Date'] = pd.to_datetime(evts_raw['Date'], dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d')
+        for _, row in evts_raw.iterrows():
             manual_events.append({
                 'title': str(row.get('Title','')), 'ticker': str(row.get('Ticker','')),
                 'date': str(row.get('Date','')), 'type': str(row.get('Type','')).lower(),
                 'audience': str(row.get('Audience','all'))
             })
 
-    real_events = []
-    if not f_port.empty and 'ticker' in f_port.columns:
-        valid_tickers = [t for t in f_port['ticker'].dropna().unique() if isinstance(t,str) and "CASH" not in t]
-        if valid_tickers:
-            real_events = fetch_company_events(valid_tickers)
+    real_events = market_events_raw 
     
     full_calendar = real_events + manual_events
 
@@ -756,7 +755,7 @@ def load_data():
     # 7. Process Attendance
     att = att_raw
     if not att.empty and 'Date' in att.columns:
-        att['Date'] = pd.to_datetime(att['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+        att['Date'] = pd.to_datetime(att['Date'],dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d')
 
     return members, f_port, q_port, proposals, full_calendar, f_total, q_total, df_votes, nav_fund, nav_quant, att
 # ==========================================
@@ -782,6 +781,287 @@ def check_password(plain_password, stored_password):
         return True, False # Valid and already secure
         
     return False, False
+
+def get_user_by_username(username, df):
+    """Finds a user in the dataframe without a password (trusts the cookie)."""
+    if df.empty: return None
+    
+    # Clean username match
+    user_row = df[df['u'] == username]
+    if not user_row.empty:
+        return user_row.iloc[0].to_dict()
+    return None
+
+def update_proposal_status(proposal_id, new_status_val):
+    """Updates the 'Applied' column (1 = Closed, 0 = Active)."""
+    try:
+        client = init_connection()
+        ws = client.open("TIC_Database_Master").worksheet("Proposals")
+        
+        # Find row by ID (Column A)
+        col_id = ws.col_values(1)
+        try:
+            row_idx = col_id.index(str(proposal_id)) + 1
+        except ValueError:
+            return False, f"ID {proposal_id} not found."
+            
+        # Update 'Applied' column (Column G is index 7)
+        # Based on screenshot: A=1, B=2, C=3, D=4, E=5, F=6, G=7
+        ws.update_cell(row_idx, 7, new_status_val)
+        
+        return True, "Status updated."
+    except Exception as e:
+        return False, str(e)
+
+def create_new_proposal(dept, type_val, item, desc, end_date):
+    """Appends a row: [ID, Dept, Type, Item, Description, End_Date, Applied]"""
+    try:
+        new_id = str(int(datetime.now().timestamp())) # Simple unique ID
+        
+        # Structure matches your screenshot exactly
+        row = [
+            new_id,         # A: ID
+            dept,           # B: Dept
+            type_val,       # C: Type
+            item,           # D: Item
+            desc,           # E: Description
+            end_date,       # F: End_Date
+            "0"             # G: Applied (0 = Active)
+        ]
+        
+        return append_to_gsheet("Proposals", row)
+    except Exception as e:
+        print(e)
+        return False
+    
+def process_financial_transaction(target_name, trans_type, amount, nav_f, nav_q):
+    """
+    1. Finds user by Name.
+    2. Updates their Units in 'Members' tab.
+    3. Logs the transaction permanently in 'Ledger' tab.
+    """
+    try:
+        client = init_connection()
+        sh = client.open("TIC_Database_Master")
+        ws_mem = sh.worksheet("Members")
+        
+        # 1. Find User Row
+        col_a = ws_mem.col_values(1) # Column A = Name
+        try:
+            row_idx = col_a.index(target_name) + 1
+        except ValueError:
+            return False, f"Name '{target_name}' not found in Column A."
+
+        # 2. Get Current Values
+        def get_val(r, c):
+            val = ws_mem.cell(r, c).value
+            return float(val.replace(',', '')) if val else 0.0
+
+        current_units_f = get_val(row_idx, 14) # Col N
+        current_units_q = get_val(row_idx, 15) # Col O
+        
+        # 3. Calculate Unit Change (50/50 Split)
+        # Avoid division by zero if NAV is 0 (e.g. start of fund)
+        nav_f_safe = nav_f if nav_f > 0 else 1.0
+        nav_q_safe = nav_q if nav_q > 0 else 1.0
+        
+        allocation_f = amount * 0.5
+        allocation_q = amount * 0.5
+        
+        delta_units_f = allocation_f / nav_f_safe
+        delta_units_q = allocation_q / nav_q_safe
+
+        # 4. Apply Logic
+        if trans_type == "DEPOSIT":
+            new_units_f = current_units_f + delta_units_f
+            new_units_q = current_units_q + delta_units_q
+            ws_mem.update_cell(row_idx, 10, 0) # Clear 'Deposit Pending'
+            log_type = "Deposit"
+            
+        elif trans_type == "WITHDRAWAL":
+            new_units_f = current_units_f - delta_units_f
+            new_units_q = current_units_q - delta_units_q
+            ws_mem.update_cell(row_idx, 11, 0) # Clear 'Liq Pending'
+            log_type = "Withdrawal"
+            
+            # Negate amount/units for the ledger to show outflow
+            amount = -amount 
+            delta_units_f = -delta_units_f
+            delta_units_q = -delta_units_q
+
+        # 5. COMMIT CHANGES (The "destructive" part)
+        ws_mem.update_cell(row_idx, 14, new_units_f)
+        ws_mem.update_cell(row_idx, 15, new_units_q)
+        
+        # 6. LOG TO LEDGER (The "history" part)
+        # Format: [Date, Member, Type, Amount, Units_F_Change, Units_Q_Change, NAV_Combined]
+        ledger_row = [
+            datetime.now().strftime("%Y-%m-%d %H:%M"),
+            target_name,
+            log_type,
+            str(amount),
+            str(delta_units_f),
+            str(delta_units_q),
+            str(nav_f + nav_q)
+        ]
+        
+        # Helper to write to Ledger tab
+        try:
+            ws_led = sh.worksheet("Ledger")
+            ws_led.append_row(ledger_row)
+        except:
+            print("Warning: Could not write to Ledger tab (Check if it exists).")
+
+        return True, f"{log_type} recorded. Ledger updated."
+
+    except Exception as e:
+        return False, str(e)
+    
+def reject_financial_request(target_name, trans_type):
+    """Finds user by FULL NAME and clears the pending request."""
+    try:
+        client = init_connection()
+        ws = client.open("TIC_Database_Master").worksheet("Members")
+        
+        col_a = ws.col_values(1)
+        try:
+            row_idx = col_a.index(target_name) + 1
+        except ValueError:
+            return False, f"Name '{target_name}' not found in Column A."
+        
+        if trans_type == "DEPOSIT":
+            ws.update_cell(row_idx, 10, 0) # Clear Col J
+        else:
+            ws.update_cell(row_idx, 11, 0) # Clear Col K
+            
+        return True, "Request cleared."
+    except Exception as e:
+        return False, str(e)
+
+
+@st.cache_data(ttl=3600)
+def get_volatility_surface(ticker):
+    """Fetches option chains to build a Volatility Surface."""
+    try:
+        stock = yf.Ticker(ticker)
+        exp_dates = stock.options
+        if not exp_dates: return pd.DataFrame()
+        
+        # Limit to first 6 expirations to stay fast
+        strikes = []
+        expirations = []
+        ivs = []
+        
+        for date in exp_dates[:6]:
+            opt = stock.option_chain(date)
+            # Combine Calls and Puts or just use Calls for IV
+            calls = opt.calls
+            
+            # Filter for liquidity
+            calls = calls[calls['impliedVolatility'] > 0.001]
+            calls = calls[calls['volume'] > 0]
+            
+            for _, row in calls.iterrows():
+                strikes.append(row['strike'])
+                # Calculate days to expiration
+                days = (pd.to_datetime(date) - datetime.now()).days
+                expirations.append(days)
+                ivs.append(row['impliedVolatility'])
+                
+        return pd.DataFrame({'Strike': strikes, 'Days': expirations, 'IV': ivs})
+    except:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600*24)
+def calculate_real_portfolio_volatility(f_port, q_port):
+    """
+    Calculates the annualized volatility of the CURRENT portfolio 
+    based on the last 1 year of price movements.
+    """
+    # 1. Consolidate Portfolios
+    assets = []
+    
+    # Process Fundamental
+    if not f_port.empty and 'ticker' in f_port.columns:
+        for _, row in f_port.iterrows():
+            if "CASH" not in str(row['ticker']):
+                assets.append({'ticker': row['ticker'], 'value': row['market_value']})
+                
+    # Process Quant
+    if not q_port.empty:
+        col = 'ticker' if 'ticker' in q_port.columns else 'model_id'
+        for _, row in q_port.iterrows():
+            if "CASH" not in str(row[col]):
+                assets.append({'ticker': row[col], 'value': row['market_value']})
+    
+    if not assets: return 0.15 # Default to 15% if empty
+
+    df_assets = pd.DataFrame(assets)
+    # Group by ticker in case of duplicates (e.g. held in both portfolios)
+    df_assets = df_assets.groupby('ticker')['value'].sum().reset_index()
+    
+    total_val = df_assets['value'].sum()
+    if total_val == 0: return 0.15
+    
+    df_assets['weight'] = df_assets['value'] / total_val
+    
+    # 2. Download Historical Data (1 Year)
+    tickers = df_assets['ticker'].tolist()
+    try:
+        # Download close prices
+        data = yf.download(tickers, period="1y", progress=False)['Close']
+        
+        # Handle single ticker case (returns Series instead of DF)
+        if isinstance(data, pd.Series): 
+            data = data.to_frame(name=tickers[0])
+            
+        # Drop columns with all NaNs
+        data = data.dropna(axis=1, how='all')
+        
+        # Calculate Daily Returns
+        returns = data.pct_change().dropna()
+        
+        # 3. Calculate Portfolio Volatility using Weights
+        # Formula: Variance = w_transpose * Covariance_Matrix * w
+        
+        # Align weights with the downloaded columns (some might have failed)
+        valid_tickers = returns.columns.tolist()
+        df_valid = df_assets[df_assets['ticker'].isin(valid_tickers)].set_index('ticker')
+        
+        # Re-normalize weights to 100% (in case some tickers failed download)
+        df_valid['weight'] = df_valid['weight'] / df_valid['weight'].sum()
+        
+        weights = df_valid['weight'].values
+        cov_matrix = returns.cov() * 252 # Annualized Covariance
+        
+        # Portfolio Variance
+        port_variance = np.dot(weights.T, np.dot(cov_matrix, weights))
+        port_volatility = np.sqrt(port_variance)
+        
+        return float(port_volatility)
+        
+    except Exception as e:
+        print(f"Vol Calc Error: {e}")
+        return 0.15 # Fallback
+
+def run_monte_carlo(current_nav, volatility, years=1, simulations=1000):
+    """Runs Geometric Brownian Motion simulations."""
+    dt = 1/252 # Daily steps
+    days = int(years * 252)
+    
+    # Assumptions: 7% expected annual return (Drift)
+    mu = 0.07 
+    
+    # Simulation Matrix
+    # S_t = S_0 * exp((mu - 0.5*sigma^2)*t + sigma*W_t)
+    paths = np.zeros((days, simulations))
+    paths[0] = current_nav
+    
+    for t in range(1, days):
+        rand = np.random.standard_normal(simulations)
+        paths[t] = paths[t-1] * np.exp((mu - 0.5 * volatility**2) * dt + volatility * np.sqrt(dt) * rand)
+        
+    return paths
 
 @st.cache_data(ttl=3600*12)
 def fetch_simulated_history(f_port, q_port):
@@ -1067,7 +1347,26 @@ def mark_proposal_applied(proposal_id):
     except Exception as e:
         st.error(f"Update failed: {e}")
         return False
+
+def append_to_gsheet(sheet_name, row_data):
+    """
+    Appends a list of values as a new row to the specified Google Sheet tab.
+    """
+    try:
+        # Re-use the existing connection logic
+        client = init_connection()
+        if not client: return False
         
+        sh = client.open("TIC_Database_Master")
+        worksheet = sh.worksheet(sheet_name)
+        
+        # Append the row
+        worksheet.append_row(row_data)
+        return True
+    except Exception as e:
+        print(f"Write Error: {e}")
+        return False
+            
 def update_member_field_in_gsheet(username, field_name, new_value):
     """
     Surgical update: Finds specific user and updates one specific cell.
@@ -1202,101 +1501,113 @@ class PDFReport(FPDF):
         self.cell(0, 10, f'Page {self.page_no()} - Internal Use Only - Generated via TIC Portal', 0, 0, 'C')
 
 def create_enhanced_pdf_report(f_port, q_port, f_total, q_total, nav_f, nav_q, report_title, proposals):
+    """Generates a professional PDF Research Note. (Fixed for Encoding)"""
     pdf = PDFReport()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # --- 1. EXECUTIVE SUMMARY ---
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 10, f"Executive Summary: {report_title}", ln=True)
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(0, 6, f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True)
+    # --- 1. HEADER & EXECUTIVE SUMMARY ---
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, f"TIC Intelligence Brief: {report_title}", ln=True)
+    
+    pdf.set_font("Arial", "I", 10)
+    pdf.cell(0, 6, f"Generated: {datetime.now().strftime('%d %B %Y at %H:%M')}", ln=True)
     pdf.ln(5)
     
-    # Financial Metrics
+    # AUM TABLE
     pdf.set_fill_color(240, 240, 240)
     pdf.set_font("Arial", "B", 10)
-    pdf.cell(60, 8, "Metric", 1, 0, 'L', 1)
-    pdf.cell(60, 8, "Value (EUR)", 1, 1, 'R', 1)
+    pdf.cell(60, 8, "Fund Segment", 1, 0, 'L', 1)
+    # FIX: Changed (€) to (EUR) to prevent encoding crash
+    pdf.cell(40, 8, "NAV (EUR)", 1, 0, 'R', 1)
+    pdf.cell(60, 8, "Total Assets (EUR)", 1, 1, 'R', 1)
+    
     pdf.set_font("Arial", "", 10)
-    pdf.cell(60, 8, "Total AUM", 1, 0, 'L')
-    pdf.cell(60, 8, f"{f_total + q_total:,.2f}", 1, 1, 'R')
-    pdf.cell(60, 8, "Fundamental Fund", 1, 0, 'L')
+    pdf.cell(60, 8, "Fundamental", 1, 0, 'L')
+    pdf.cell(40, 8, f"{nav_f:.2f}", 1, 0, 'R')
     pdf.cell(60, 8, f"{f_total:,.2f}", 1, 1, 'R')
-    pdf.cell(60, 8, "Quant Fund", 1, 0, 'L')
+    
+    pdf.cell(60, 8, "Quant / Algo", 1, 0, 'L')
+    pdf.cell(40, 8, f"{nav_q:.2f}", 1, 0, 'R')
     pdf.cell(60, 8, f"{q_total:,.2f}", 1, 1, 'R')
-    pdf.ln(5)
+    
+    # TOTAL ROW
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(100, 8, "Total AUM", 1, 0, 'R')
+    pdf.cell(60, 8, f"{(f_total + q_total):,.2f}", 1, 1, 'R')
+    pdf.ln(8)
 
-    # --- 2. MARKET CONTEXT (New) ---
-    # We pull this live to give context to the AUM numbers
-    macro = fetch_macro_data() 
+    # --- 2. MARKET CONTEXT (Live Data) ---
+    macro = fetch_macro_data()
     vix = macro.get('VIX', {}).get('value', 0)
-    yield_10y = macro.get('10Y Treasury', {}).get('value', 0)
+    oil = macro.get('Crude Oil', {}).get('value', 0)
+    eurusd = macro.get('EUR/USD', {}).get('value', 0)
     
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Market Context", ln=True)
+    pdf.cell(0, 8, "Global Market Context", ln=True)
     pdf.set_font("Arial", "", 10)
-    pdf.cell(0, 6, f"Market Volatility (VIX): {vix:.2f} | US 10Y Yield: {yield_10y:.2f}%", ln=True)
-    pdf.ln(5)
-
-    # --- 3. GOVERNANCE & STRATEGY (New) ---
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Governance & Strategic Decisions", ln=True)
     
-    # Filter Proposals
-    applied_props = [p for p in proposals if str(p.get('Applied')) == '1']
+    # Macro Grid
+    pdf.cell(50, 8, f"Volatility (VIX): {vix:.2f}", 1, 0, 'C')
+    pdf.cell(50, 8, f"EUR/USD: {eurusd:.4f}", 1, 0, 'C')
+    pdf.cell(50, 8, f"Crude Oil: ${oil:.2f}", 1, 1, 'C')
+    pdf.ln(8)
+
+    # --- 3. GOVERNANCE UPDATE ---
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 8, "Governance & Strategy", ln=True)
+    pdf.set_font("Arial", "", 10)
+    
+    # Split Proposals
     active_props = [p for p in proposals if str(p.get('Applied')) == '0']
     
-    pdf.set_font("Arial", "B", 10)
-    pdf.cell(0, 8, "Recently Executed / Applied:", ln=True)
-    pdf.set_font("Arial", "", 9)
-    
-    if applied_props:
-        for p in applied_props:
-            # Format: [Fundamental] BUY: AMD
-            line = f"[{p.get('Dept')}] {p.get('Type')}: {p.get('Item')} - {p.get('Description')[:60]}..."
-            # Draw a small green checkmark (using ASCII or simplified char)
-            pdf.cell(5, 6, "x", 0, 0) 
-            pdf.cell(0, 6, line, ln=True)
-    else:
-        pdf.cell(0, 6, "No recent executed proposals.", ln=True)
-        
-    pdf.ln(2)
-    pdf.set_font("Arial", "B", 10)
-    pdf.cell(0, 8, "Active Voting Items:", ln=True)
-    pdf.set_font("Arial", "", 9)
-    
     if active_props:
-        for p in active_props:
-            line = f"[{p.get('Dept')}] {p.get('Type')}: {p.get('Item')} (Ends: {p.get('End_Date')})"
-            pdf.cell(5, 6, "-", 0, 0)
+        pdf.set_text_color(200, 0, 0) # Dark Red for Action Items
+        pdf.cell(0, 6, "ACTION REQUIRED: Active Voting Items", ln=True)
+        pdf.set_text_color(0, 0, 0) # Reset
+        
+        for p in active_props[:5]: # Limit to 5
+            # Ensure no special chars in description
+            desc_clean = str(p.get('Item')).encode('latin-1', 'replace').decode('latin-1')
+            line = f"[] {p.get('Type')}: {desc_clean} ({p.get('Dept')}) - Ends {p.get('End_Date')}"
             pdf.cell(0, 6, line, ln=True)
     else:
-        pdf.cell(0, 6, "No active voting items.", ln=True)
+        pdf.cell(0, 6, "No active voting items at this time.", ln=True)
     
-    pdf.ln(10)
+    pdf.ln(8)
 
-    # --- 4. PORTFOLIO SNAPSHOTS ---
-    # (Keep your existing Holdings tables here...)
+    # --- 4. TOP HOLDINGS ---
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Top Fundamental Holdings", ln=True)
+    pdf.cell(0, 8, "Top Fundamental Positions", ln=True)
+    
     pdf.set_font("Arial", "B", 9)
-    pdf.cell(30, 8, "Ticker", 1, 0, 'L', 1)
-    pdf.cell(80, 8, "Asset Name", 1, 0, 'L', 1)
-    pdf.cell(40, 8, "Weight", 1, 1, 'R', 1)
+    pdf.cell(30, 6, "Ticker", 1, 0, 'L', 1)
+    pdf.cell(30, 6, "Value", 1, 0, 'R', 1)
+    pdf.cell(30, 6, "Weight", 1, 1, 'R', 1)
     
     pdf.set_font("Arial", "", 9)
-    if not f_port.empty and 'target_weight' in f_port.columns:
-        top_f = f_port.sort_values('target_weight', ascending=False).head(8)
-        for _, row in top_f.iterrows():
-            name = str(row.get('name', 'Unknown'))[:35]
-            ticker = str(row.get('ticker', ''))
-            weight = float(row.get('target_weight', 0)) * 100
-            pdf.cell(30, 7, ticker, 1, 0, 'L')
-            pdf.cell(80, 7, name, 1, 0, 'L')
-            pdf.cell(40, 7, f"{weight:.1f}%", 1, 1, 'R')
     
-    return pdf.output(dest='S').encode('latin-1')
+    if not f_port.empty:
+        # Sort by Market Value
+        if 'market_value' in f_port.columns:
+            f_sorted = f_port.sort_values('market_value', ascending=False).head(5)
+            
+            total_fund_val = f_port['market_value'].sum()
+            
+            for _, row in f_sorted.iterrows():
+                t = str(row.get('ticker', 'N/A'))
+                val = float(row.get('market_value', 0))
+                # Calc weight dynamically if missing
+                w = (val / total_fund_val * 100) if total_fund_val > 0 else 0.0
+                
+                pdf.cell(30, 6, t, 1, 0, 'L')
+                pdf.cell(30, 6, f"{val:,.0f}", 1, 0, 'R')
+                pdf.cell(30, 6, f"{w:.1f}%", 1, 1, 'R')
+    else:
+        pdf.cell(0, 6, "No holdings data available.", 1, 1)
+
+    # Return safe encoded bytes
+    return pdf.output(dest='S').encode('latin-1', 'replace')
     
 # ==========================================
 # 4. VIEW COMPONENTS
@@ -1530,111 +1841,110 @@ def render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calen
         with b2:
             st.info("System healthy. No pending critical alerts.")
             
-def render_voting_section(user, proposals, votes_df, target_dept):
-    """Renders the voting UI with a Circular Donut Chart."""
-    st.header(f"🗳️ {target_dept} Governance")
+def render_voting_section(user, proposals, votes_df, user_dept_context):
+    """
+    Renders voting cards based on the user's department context.
+    Includes 'Optimistic UI' to prevent double-voting during sync lags.
+    """
+    st.header(f"🗳️ Active Proposals")
     
-    # Filter active proposals
-    active_props = [p for p in proposals if p.get('Dept') == target_dept and str(p.get('Applied')) == '0']
+    # 1. Initialize 'recently_voted' in session state if missing
+    if 'recently_voted' not in st.session_state:
+        st.session_state['recently_voted'] = []
+
+    # 2. Define Visibility Logic
+    visible_depts = [user_dept_context, "Board", "General"]
+    
+    # 3. Filter Active Proposals
+    active_props = [
+        p for p in proposals 
+        if str(p.get('Applied')) == '0' and p.get('Dept') in visible_depts
+    ]
     
     if not active_props:
-        st.info("No active proposals.")
+        st.info(f"No active proposals for {user_dept_context} or Board.")
         return
 
     for p in active_props:
         p_id = str(p['ID'])
+        dept_tag = p.get('Dept')
+        
+        # Color Coding
+        border_color = "rgba(49, 51, 63, 0.2)"
+        if dept_tag == "Quant": border_color = "#0068c9"
+        elif dept_tag == "Fundamental": border_color = "#FFA500"
+        elif dept_tag == "Board": border_color = "#D4AF37"
+
+        st.markdown(f"""<div style="border-left: 5px solid {border_color}; padding-left: 10px; margin-bottom: 10px;">""", unsafe_allow_html=True)
         
         with st.container(border=True):
-            # Layout: Description (Left) | Chart (Middle) | Buttons (Right)
             c_desc, c_chart, c_act = st.columns([3, 1.5, 1.5])
             
-            # --- 1. CALCULATE VOTES ---
+            # --- CALCULATE VOTES (From DB) ---
+            yes_count, no_count = 0, 0
             if not votes_df.empty:
                 votes_df['Proposal_ID'] = votes_df['Proposal_ID'].astype(str)
                 relevant_votes = votes_df[votes_df['Proposal_ID'] == p_id]
                 yes_count = len(relevant_votes[relevant_votes['Vote'] == 'YES'])
                 no_count = len(relevant_votes[relevant_votes['Vote'] == 'NO'])
-            else:
-                yes_count, no_count = 0, 0
-            
             total = yes_count + no_count
 
-            # --- COLUMN 1: DESCRIPTION ---
             with c_desc:
-                st.subheader(f"{p.get('Type')}: {p.get('Item')}")
+                st.caption(f"**{dept_tag.upper()}** | {p.get('Type')}")
+                st.subheader(f"{p.get('Item')}")
                 st.write(p.get('Description'))
-                st.caption(f"Ends: {p.get('End_Date')}")
+                st.caption(f"Deadline: {p.get('End_Date')}")
 
-            # --- COLUMN 2: CIRCULAR CHART ---
             with c_chart:
                 if total > 0:
                     fig = go.Figure(data=[go.Pie(
-                        labels=['For', 'Against'],
-                        values=[yes_count, no_count],
-                        hole=0.6,
-                        marker=dict(colors=['#228B22', '#D2042D']),
-                        textinfo='none',
-                        hoverinfo='label+value+percent'
+                        labels=['For', 'Against'], values=[yes_count, no_count],
+                        hole=0.7, marker=dict(colors=['#228B22', '#D2042D']),
+                        textinfo='none', hoverinfo='label+value'
                     )])
-                    
                     fig.update_layout(
-                        showlegend=False,
-                        margin=dict(l=0, r=0, t=0, b=0),
-                        height=120,
-                        annotations=[dict(text=f"{yes_count}v{no_count}", x=0.5, y=0.5, font_size=16, showarrow=False, font=dict(color="white"))],
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)'
+                        showlegend=False, margin=dict(l=10, r=10, t=10, b=10), height=100,
+                        annotations=[dict(text=f"{yes_count}/{total}", x=0.5, y=0.5, font_size=14, showarrow=False, font=dict(color="white"))],
+                        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
                     )
-                    
-                    # FIX: Added unique key=f"chart_{p_id}" to prevent Duplicate ID error
-                    st.plotly_chart(
-                        fig, 
-                        use_container_width=True, 
-                        config={'displayModeBar': False}, 
-                        key=f"chart_{p_id}"
-                    )
+                    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False}, key=f"ch_{p_id}_{user_dept_context}")
                 else:
-                    st.write("") # Spacer
-                    st.caption("No votes yet")
+                    st.markdown("<br><br>", unsafe_allow_html=True); st.caption("No votes cast yet.")
 
-            # --- COLUMN 3: ACTIONS ---
             with c_act:
                 st.write("")
-                
-                # Guest check
                 if user.get('r') == 'Guest':
-                    st.info("🔒 Guest View")
-                    st.caption("Voting disabled.")
-                
+                    st.info("🔒 Read Only")
                 else:
-                    # (Keep your existing voting logic here)
                     user_has_voted = False
+                    
+                    # CHECK 1: Database (Slow / Historical)
                     if not votes_df.empty:
                         user_vote = votes_df[(votes_df['Proposal_ID'] == p_id) & (votes_df['Username'] == user['u'])]
                         if not user_vote.empty: user_has_voted = True
+                    
+                    # CHECK 2: Session State (Fast / Instant) <--- NEW LOGIC
+                    if p_id in st.session_state['recently_voted']:
+                        user_has_voted = True
                     
                     if user_has_voted:
                         st.success("✅ Voted")
                     else:
                         c_y, c_n = st.columns(2)
-                        if c_y.button("YES", key=f"y_{p_id}"):
-                            if cast_vote_gsheet(p_id, user['u'], "YES"): st.success("Voted!"); st.rerun()
-                        if c_n.button("NO", key=f"n_{p_id}"):
-                            if cast_vote_gsheet(p_id, user['u'], "NO"): st.error("Voted!"); st.rerun()
-                    
-                    # Admin Execute (Only show if Admin AND Passing)
-                    if user.get('admin', False) and total > 0 and yes_count > no_count:
-                        if st.button("Execute", key=f"exe_{p_id}"):
-                            # ... (Keep existing execute logic) ...
-                            client = init_connection()
-                            sheet = client.open("TIC_Database_Master")
-                            ws = sheet.worksheet("Proposals")
-                            cell = ws.find(p_id)
-                            if cell:
-                                ws.update_cell(cell.row, 7, 1)
-                                st.success("Applied!")
-                                st.cache_data.clear()
-                                st.rerun()
+                        
+                        if c_y.button("YES", key=f"y_{p_id}_{user_dept_context}"):
+                            if cast_vote_gsheet(p_id, user['u'], "YES"): 
+                                # ADD TO SESSION STATE IMMEDIATELY
+                                st.session_state['recently_voted'].append(p_id) 
+                                st.success("Done!"); st.rerun()
+                                
+                        if c_n.button("NO", key=f"n_{p_id}_{user_dept_context}"):
+                            if cast_vote_gsheet(p_id, user['u'], "NO"): 
+                                # ADD TO SESSION STATE IMMEDIATELY
+                                st.session_state['recently_voted'].append(p_id) 
+                                st.error("Done!"); st.rerun()
+                            
+        st.markdown("</div>", unsafe_allow_html=True)
                             
 def render_stock_research():
     st.title("🔎 Equity Research Terminal")
@@ -1648,7 +1958,7 @@ def render_stock_research():
     with c_search:
         ticker_input = st.text_input("Enter Ticker", value=st.session_state['research_ticker'], label_visibility="collapsed").upper()
     with c_btn:
-        if st.button("Analyze", type="primary", use_container_width=True):
+        if st.button("Analyze", type="primary", width="stretch"):
             st.session_state['research_ticker'] = ticker_input
             
     ticker = st.session_state['research_ticker']
@@ -1725,7 +2035,7 @@ def render_stock_research():
         else: df_show = fins['cash']
         
         if not df_show.empty:
-            st.dataframe(df_show, use_container_width=True, height=500)
+            st.dataframe(df_show, width="stretch", height=500)
         else:
             st.warning("Financial data unavailable.")
 
@@ -1744,7 +2054,7 @@ def render_stock_research():
                         "Fwd P/E": "{:.1f}",
                         "Margins": "{:.1%}"
                     }),
-                    use_container_width=True
+                    width="stretch"
                 )
             else:
                 st.warning("Could not load peer data.")
@@ -1808,7 +2118,7 @@ def render_valuation_sandbox():
             labels={'y':'Value ($B)', 'x':''}
         )
         fig.update_traces(marker_color=['#FF9900', '#444444', '#00FF00']) 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         
         st.divider()
         
@@ -1839,7 +2149,7 @@ def render_valuation_sandbox():
             color_continuous_scale="RdYlGn"
         )
         fig_heat.update_layout(title="Implied Share Price Matrix")
-        st.plotly_chart(fig_heat, use_container_width=True)
+        st.plotly_chart(fig_heat, width="stretch")
 def render_calendar_view(user, all_events):
     st.title("🗓️ Smart Calendar")
     st.caption(f"Showing events for: {user['n']} ({user['d']} Dept)")
@@ -2003,412 +2313,436 @@ def render_upcoming_events_sidebar(all_events):
         </div>
         """, unsafe_allow_html=True)
 
-def render_admin_panel(user, members_df, f_port, q_port, f_total, q_total, proposals, votes_df, nav_f, nav_q, attendance_df):
-    st.title("🔒 Admin Console")
-    st.info(f"Logged in as: {user['n']} ({user['r']})")
-    # TABS
-    tabs = ["👥 Member Database", "💰 Treasury", "📄 Reporting", "✅ Attendance", "🗳️ Governance"]
-    if 'admin_active_tab' not in st.session_state:
-        st.session_state['admin_active_tab'] = tabs[0]
+def render_admin_panel(user, members, f_port, q_port, f_total, q_total, props, df_votes, nav_f, nav_q, att_df):
+    st.title("🛠️ Admin Command Center")
     
+    # 1. SETUP STATE FOR PERSISTENCE
+    # This ensures we stay on the same page after a reload
+    if 'admin_menu_choice' not in st.session_state:
+        st.session_state['admin_menu_choice'] = "💸 Expenses"
+
+    # Callback to update state instantly
+    def on_admin_change():
+        st.session_state['admin_menu_choice'] = st.session_state.admin_nav_key
+
+    # 2. DEFINE MENU OPTIONS
+    options = ["💸 Expenses", "👤 Users", "💰 Treasury", "🗳️ Governance", "⚙ System"]
+    
+    # Find the current index to keep the button highlighted correctly
     try:
-        curr_index = tabs.index(st.session_state['admin_active_tab'])
+        curr_index = options.index(st.session_state['admin_menu_choice'])
     except:
         curr_index = 0
-        
-    active_tab = st.radio("Admin Menu", tabs, index=curr_index, horizontal=True, label_visibility="collapsed")
-    
-    st.session_state['admin_active_tab'] = active_tab
-    st.divider()    
-    # --- TAB 1: MEMBER DATABASE (READ/WRITE) ---
-    if active_tab == "👥 Member Database":
-        st.subheader("Manage Membership")
-        st.markdown("Edit roles, emails, or status directly below.")
-        if 'members_db' not in st.session_state: st.session_state['members_db'] = members_df
-        
-        edited_df = st.data_editor(
-            st.session_state['members_db'][['n', 'email', 'r', 'd', 's', 'contribution', 'value', 'status', 'last_login']],
-            num_rows="dynamic", 
-            use_container_width=True,
-            column_config={
-                    "last_login": st.column_config.TextColumn("Last Active", disabled=True),
-                    "contribution": st.column_config.NumberColumn("Invested (€)", format="€%.2f"),
-                    "value": st.column_config.NumberColumn("Value (€)", format="€%.2f")
-                }
-        )
-        
-        if st.button("Save Database Changes"):
-            st.session_state['members_db'] = edited_df
-            
-            # FIX: Save to the specific absolute path
-            try:
-                edited_df.to_excel(MEMBER_FILE_PATH, index=False, engine='openpyxl')
-                st.success(f"Database successfully updated at:\n{MEMBER_FILE_PATH}")
-            except Exception as e:
-                st.error(f"Failed to save file: {e}. Is the file open in Excel?")
 
-    # --- TAB 2: TREASURY (UNITIZED SYSTEM) ---
-    elif active_tab == "💰 Treasury":
-        st.subheader("Fund Treasury")
-        st.caption("Issue new shares based on current Net Asset Value (NAV).")
+    # 3. RENDER THE MENU (Horizontal looks like tabs, but behaves like radio)
+    choice = st.radio(
+        "Admin Menu", 
+        options, 
+        index=curr_index, 
+        key="admin_nav_key", 
+        on_change=on_admin_change, 
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+    st.divider()
+
+    # ==========================================
+    # SECTION 1: EXPENSE MANAGER
+    # ==========================================
+    if choice == "💸 Expenses":
+        st.subheader("Ledger Management")
+        c1, c2 = st.columns([2, 1])
         
-        # Display Current NAV
-        c_nav1, c_nav2, c_nav3 = st.columns(3)
-        c_nav1.metric("NAV Fundamental", f"€{nav_f:.2f}")
-        c_nav2.metric("NAV Quant", f"€{nav_q:.2f}")
-        c_nav3.metric("Total AUM", f"€{f_total + q_total:,.2f}")
-        
-        st.divider()
-        
-        # ==========================================
-        # 1. DEPOSIT APPROVAL QUEUE 
-        # ==========================================
-        st.subheader("📥 Incoming Capital (Deposit Queue)")
-        if 'deposit_pending' not in members_df.columns:
-            members_df['deposit_pending'] = 0.0
-        # Filter users who have a pending deposit > 0
-        deposit_requests = members_df[members_df['deposit_pending'] > 0].copy()
-        
-        if not deposit_requests.empty:
-            st.info(f"🔔 {len(deposit_requests)} pending deposit request(s).")
+        with c1:
+            st.info("ℹ Adding an expense here deducts it from the Fund's Net Asset Value immediately.")
             
-            # Display Table
-            grid_df = deposit_requests[['n', 'email', 'deposit_pending']].rename(
-                columns={'n': 'Member', 'deposit_pending': 'Amount Requested'}
-            )
-            st.dataframe(grid_df, use_container_width=True)
-            
-            # Action Form
-            with st.form("approve_deposits"):
-                # Select user to approve
-                target_u = st.selectbox("Select Request to Process", deposit_requests['u'].tolist(), format_func=lambda x: deposit_requests[deposit_requests['u'] == x]['n'].values[0])
+            with st.form("expense_form", clear_on_submit=True):
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    e_date = st.date_input("Date", value=datetime.now())
+                    e_cat = st.selectbox("Category", ["Server Cost", "Data Subscription", "Legal", "Event", "Other"])
+                    e_desc = st.text_input("Description", placeholder="e.g. Oracle Cloud Monthly")
+                with col_b:
+                    e_amt = st.number_input("Amount (€)", min_value=0.0, step=0.01)
+                    e_paid = st.selectbox("Paid By / Allocation", ["Fund", "Quant", "Split 50/50"])
                 
-                # Logic: Where does the money go?
-                # Usually, we just mark it as 'Invested' (Cash Injection) first.
-                # Units are issued in the next step or automatically here. 
-                # For this workflow, we will ADD to Initial Investment and CLEAR Deposit Pending.
+                st.markdown("<br>", unsafe_allow_html=True)
+                submitted = st.form_submit_button("💸 Log Expense", type="primary", use_container_width=True)
                 
-                c_app, c_rej = st.columns(2)
-                approve = c_app.form_submit_button("✅ Approve & Log to Ledger")
-                reject = c_rej.form_submit_button("❌ Reject Request")
-                
-                if approve:
-                    client = init_connection()
-                    sheet = client.open("TIC_Database_Master")
-                    ws = sheet.worksheet("Members")
-                    
-                    # Get fresh data to find row index
-                    data = ws.get_all_records()
-                    df_live = pd.DataFrame(data)
-                    df_live['u_match'] = df_live['Name'].astype(str).str.lower().str.strip().str.replace(' ', '.')
-                    
-                    try:
-                        # Find User Row
-                        idx = df_live.index[df_live['u_match'] == target_u].tolist()[0]
-                        row_num = idx + 2
+                if submitted:
+                    if e_amt > 0:
+                        # Prepare row: [Date, Category, Amount, Paid_By, Description]
+                        row = [
+                            e_date.strftime("%Y-%m-%d"),
+                            e_cat,
+                            str(e_amt),
+                            e_paid,
+                            e_desc
+                        ]
                         
-                        # Find Columns
-                        headers = ws.row_values(1)
-                        col_dep = headers.index('Deposit Pending') + 1
-                        col_inv = headers.index('Initial Investment') + 1
-                        
-                        # Get Values
-                        req_amount = float(df_live.iloc[idx]['Deposit Pending'])
-                        curr_inv = float(df_live.iloc[idx]['Initial Investment'])
-                        
-                        # EXECUTE TRANSACTION
-                        # 1. Add to Investment
-                        ws.update_cell(row_num, col_inv, curr_inv + req_amount)
-                        # 2. Clear Pending
-                        ws.update_cell(row_num, col_dep, 0)
-                        
-                        st.success(f"Approved €{req_amount} for {target_u}. Added to Initial Investment.")
-                        st.cache_data.clear()
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Transaction failed: {e}")
+                        with st.spinner("Writing to Ledger..."):
+                            # Append to Google Sheet
+                            success = append_to_gsheet("Expenses", row)
+                            
+                        if success:
+                            st.success("✅ Expense Saved! Updating NAV...")
+                            time.sleep(1) # Give user time to read the message
+                            
+                            # FORCE REFRESH DATA
+                            st.cache_data.clear()
+                            st.rerun() # This will reload the page, but keep us on "Expenses" tab
+                        else:
+                            st.error("❌ Failed to write to database.")
+                    else:
+                        st.warning("Amount must be greater than 0.")
+        
+        with c2:
+            # Show Recent Expenses (Preview)
+            st.write("###### Recent Logs")
+            # We need to load expenses quickly here if available
+            # In a real scenario, we'd pass 'expenses_df' into this function.
+            # For now, we rely on the cache reload.
+            st.caption("Logs update after refresh.")
 
-                if reject:
-                    if update_member_field_in_gsheet(target_u, 'Deposit Pending', 0):
-                        st.warning(f"Request for {target_u} rejected and cleared.")
-                        st.rerun()
-        else:
-            st.success("✅ No pending deposit requests.")
 
-        st.divider()
-
-        # ==========================================
-        # 2. UNIT ISSUANCE (EXISTING)
-        # ==========================================
-        with st.expander("⚙️ Advanced: Manual Unit Issuance", expanded=False):
-            st.caption("Use this only if you need to issue units WITHOUT money changing hands (e.g. corrections).")
-            with st.form("issue_units_manual"):
-                target_user = st.selectbox("Select Member", members_df['u'].tolist())
-                amount = st.number_input("Value (€)", min_value=0.0, step=50.0)
-                fund_choice = st.radio("Allocate to:", ["Fundamental Fund", "Quant Fund", "50/50 Split"])
+    # ==========================================
+    # SECTION 2: USER ONBOARDING
+    # ==========================================
+    elif choice == "👤 Users":
+        st.subheader("Onboard New Member")
+        st.info("ℹ The name entered below will be used as the Login ID (Column A).")
+        
+        with st.form("new_user_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                # 1. NAME (Col A) 
+                n_name = st.text_input("Full Name / Username", placeholder="e.g. John Smith")
                 
-                preview_f, preview_q = 0.0, 0.0
-                if amount > 0:
-                    if fund_choice == "Fundamental Fund": preview_f = amount / nav_f
-                    elif fund_choice == "Quant Fund": preview_q = amount / nav_q
-                    else: 
-                        preview_f = (amount * 0.5) / nav_f
-                        preview_q = (amount * 0.5) / nav_q
+                # 2. TEAM (Col G)
+                n_team = st.selectbox("Team", ["Fundamental", "Quant", "Board", "Advisory", "General"])
                 
-                st.info(f"Issuance: {preview_f:.4f} Fund Units | {preview_q:.4f} Quant Units")
+                # 3. STATUS (Col E)
+                n_status = st.selectbox("Status", ["Active", "Alumni", "Guest", "Inactive"])
+
+            with c2:
+                # 4. ROLE (Col F)
+                n_role = st.selectbox("Role", ["Analyst", "Senior Analyst", "Board Member", "Guest", "Alumni"])
                 
-                if st.form_submit_button("Issue Units"):
-                    # ... (Existing logic for unit issuance can remain here or copy from previous code) ...
-                    # For brevity, assuming you keep the existing logic logic here or use the update_member_fields helper
-                    pass
-        
-        st.divider()
-        st.subheader("Liquidation Queue")
-        
-        # 1. Filter and Prepare the Queue DataFrame
-        # liq_pending=1 is the core filter
-        pending_requests = members_df[members_df['liq_pending'] == 1].copy()
-        
-        if not pending_requests.empty:
-            # Prepare display DataFrame, ensuring 'u' (username) is available for lookup
-            liq_df_edit = pending_requests.rename(columns={'n': 'Member', 'value': 'Amount'})
-            
-            # Add a checkbox column for selection and initialize it to False
-            liq_df_edit['Approve'] = False 
-            
-            # Select the columns needed for the editor display and processing
-            liq_df_edit = liq_df_edit[['Approve', 'Member', 'Amount', 'u']]
-            
-            # Display DataFrame with checkbox enabled
-            selected_data = st.data_editor(
-                liq_df_edit.drop(columns=['u']), # Drop 'u' for visual display
-                hide_index=True,
-                column_config={
-                    "Approve": st.column_config.CheckboxColumn(default=False),
-                    "Amount": st.column_config.NumberColumn(format="€%.2f"),
-                },
-                use_container_width=True,
-                key='liq_queue_editor' # Key for accessing selections
-            )
-            
-            # 3. Identify selected users
-            # Get the rows from the output where 'Approve' was ticked
-            ticked_rows = selected_data[selected_data['Approve'] == True]
-            
-            # Map the index of ticked rows back to the 'u' column of the input data ('liq_df_edit')
-            selected_usernames = liq_df_edit.loc[ticked_rows.index, 'u'].tolist()
-
-            c_a, c_b = st.columns(2)
-            
-            # APPROVE BUTTON LOGIC
-            if c_a.button(f"Approve {len(selected_usernames)} Request(s)", type="primary", disabled=not selected_usernames):
-                # APPROVE: Liq Pending = 0, Liq Approved = 1
-                updates = {'Liq Pending': 0, 'Liq Approved': 1}
-                # Call the helper function to update the Excel file
-                if update_member_fields_in_gsheet_bulk(selected_usernames, updates):
-                    st.success(f"✅ Approved {len(selected_usernames)} requests. Please clear cache (or restart) to update.")
-                else:
-                    st.error("❌ Approval failed. Check file permissions.")
-                st.rerun()
-
-            # DENY BUTTON LOGIC
-            if c_b.button("Deny Selected", disabled=not selected_usernames):
-                # DENY: Liq Pending = 0, Liq Approved = 0 (Clears pending state)
-                updates = {'Liq Pending': 0, 'Liq Approved': 0}
-                if update_member_fields_in_gsheet_bulk(selected_usernames, updates):
-                    st.info(f"Requests for {len(selected_usernames)} users denied and cleared.")
-                else:
-                    st.error("❌ Denial failed.")
-                st.rerun()
-
-        else:
-            st.info("✅ No pending liquidation requests.")
-        pass
-
-    # --- TAB 3: REPORTING ---
-    elif active_tab == "📄 Reporting":
-        st.subheader("Generate Official Reports")
-        st.caption("Creates a PDF snapshot of the current portfolio state, AUM, and governance log.")
-        
-        # 1. Inputs (No Form)
-        report_title = st.text_input("Report Title", value=f"Status Report - {datetime.now().strftime('%B %Y')}")
-        
-        # 2. Generate Button
-        if st.button("📄 Prepare PDF Report"):
-            with st.spinner("Generating PDF..."):
-                # Generate and save to Session State
-                pdf_bytes = create_enhanced_pdf_report(
-                    f_port, q_port, 
-                    f_total, q_total, 
-                    nav_f, nav_q, 
-                    report_title,
-                    proposals
-                )
-                st.session_state['generated_pdf_data'] = pdf_bytes
-                st.success("Report Ready!")
-
-        # 3. Download Button (Shows only if report exists in memory)
-        if 'generated_pdf_data' in st.session_state:
-            fname = f"TIC_Report_{datetime.now().strftime('%Y%m%d')}.pdf"
-            
-            st.download_button(
-                label="📥 Download PDF",
-                data=st.session_state['generated_pdf_data'],
-                file_name=fname,
-                mime="application/pdf"
-            )
-        st.divider()
-        st.subheader("💾 System Backup")
-        st.caption("Download raw database snapshots for offline storage.")
-    
-        c_b1, c_b2, c_b3, c_b4 = st.columns(4)
-    
-        # 1. Members Backup
-        c_b1.download_button(
-            "👥 Members",
-            members_df.to_csv(index=False).encode('utf-8'),
-            f"Backup_Members_{datetime.now().strftime('%Y%m%d')}.csv",
-            "text/csv"
-        )
-    
-        # 2. Votes Backup
-        if not votes_df.empty:
-            c_b2.download_button(
-                "🗳️ Votes",
-                votes_df.to_csv(index=False).encode('utf-8'),
-                f"Backup_Votes_{datetime.now().strftime('%Y%m%d')}.csv",
-                "text/csv"
-            )
-        
-        # 3. Fundamental Portfolio Backup
-        c_b3.download_button(
-            "📈 Fundamentals",
-            f_port.to_csv(index=False).encode('utf-8'),
-            f"Backup_Fund_{datetime.now().strftime('%Y%m%d')}.csv",
-            "text/csv"
-        )
-
-        # 4. Quant Portfolio Backup
-        c_b4.download_button(
-            "🤖 Quant",
-            q_port.to_csv(index=False).encode('utf-8'),
-            f"Backup_Quant_{datetime.now().strftime('%Y%m%d')}.csv",
-            "text/csv"
-        )    
-        pass
-    
-    # --- TAB 4: ATTENDANCE ---
-    elif active_tab == "✅ Attendance":
-        st.subheader("Meeting Attendance Tracker")
-        
-        # 1. Select Meeting Date
-        meet_date = st.date_input("Meeting Date", datetime.now())
-        date_str = meet_date.strftime('%Y-%m-%d')
-        
-        # 2. Interactive Table
-        # We create a temporary dataframe for the UI
-        input_df = pd.DataFrame({
-            'Member': members_df['n'],
-            'Username': members_df['u'], # Hidden ID
-            'Present': True # Default to Present
-        })
-        
-        edited_att = st.data_editor(
-            input_df,
-            column_config={
-                "Username": None, # Hide this column
-                "Present": st.column_config.CheckboxColumn("Present?", default=True)
-            },
-            hide_index=True,
-            use_container_width=True
-        )
-        
-        # 3. Save Button
-        if st.button("💾 Save Attendance Log"):
-            # Convert the editor data into the format needed for the helper
-            att_dict = {}
-            for index, row in edited_att.iterrows():
-                status = "Present" if row['Present'] else "Absent"
-                att_dict[row['Username']] = status
-            
-            if save_attendance_log(date_str, att_dict):
-                st.success(f"Attendance for {date_str} saved successfully.")
-            else:
-                st.error("Failed to save attendance.")
-        
-        st.divider()
-        
-        # 4. View History
-        st.markdown("#### 📜 History Log")
-        # Placeholder until you update the function signature
-        st.dataframe(attendance_df, use_container_width=True)
-    
-    # --- TAB 5: GOVERNANCE ---
-    elif active_tab == "🗳️ Governance":
-        st.subheader("Proposal Archive & Live Results")
-        
-        if not proposals:
-            st.info("No proposals found in database.")
-        else:
-            # 1. Aggregate Votes
-            summary_data = []
-            for p in proposals:
-                p_id = str(p['ID'])
+                # 5. EMAIL (Col D)
+                n_email = st.text_input("Email", placeholder="@tilburguniversity.edu")
                 
-                # Filter votes for this specific proposal
-                if not votes_df.empty:
-                    # Ensure types match for filtering
-                    votes_df['Proposal_ID'] = votes_df['Proposal_ID'].astype(str)
-                    p_votes = votes_df[votes_df['Proposal_ID'] == p_id]
-                    yes = len(p_votes[p_votes['Vote'] == 'YES'])
-                    no = len(p_votes[p_votes['Vote'] == 'NO'])
-                else:
-                    yes, no = 0, 0
-                
-                # Determine Status Label
-                status = "🔴 Applied/Closed" if str(p.get('Applied')) == '1' else "🟢 Active"
-                
-                summary_data.append({
-                    "ID": p_id,
-                    "Type": p.get('Type'),
-                    "Item": p.get('Item'),
-                    "Dept": p.get('Dept'),
-                    "✅ Yes": yes,
-                    "❌ No": no,
-                    "Total": yes + no,
-                    "Status": status
-                })
-            
-            # 2. Display as Interactive Table
-            df_summary = pd.DataFrame(summary_data)
-            st.dataframe(
-                df_summary, 
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Status": st.column_config.TextColumn(
-                        "Status", 
-                        help="0=Active, 1=Applied",
-                        width="medium"
-                    ),
-                    "Total": st.column_config.ProgressColumn(
-                        "Engagement", 
-                        format="%d", 
-                        min_value=0, 
-                        max_value=len(members_df)
-                    )
-                }
-            )
+                # 6. PASSWORD (Col C)
+                n_pass = st.text_input("Temporary Password", type="password")
             
             st.divider()
-            st.markdown("#### 🔎 Detailed Vote Log")
-            with st.expander("View Individual Votes"):
-                if not votes_df.empty:
-                    st.dataframe(votes_df, use_container_width=True, hide_index=True)
+            submit_user = st.form_submit_button("👤 Create User", type="primary", use_container_width=True)
+            
+            if submit_user:
+                if n_name and n_pass:
+                    # PREPARE ROW DATA (Columns A -> R)
+                    # We use n_name directly for Column A (Name/ID) AND Column I (Bio)
+                    
+                    new_row = [
+                        n_name.strip(),                         # A: Name (Login ID)
+                        datetime.now().strftime("%d/%m/%Y"),    # B: Join Date (DD/MM/YYYY)
+                        n_pass,                                 # C: Password
+                        n_email,                                # D: Email
+                        n_status,                               # E: Status
+                        n_role,                                 # F: Role
+                        n_team,                                 # G: Team
+                        "",                                     # H: LinkedIn (Empty)
+                        "",                                     # I: Bio (Full Name Backup)
+                        "0",                                    # J: Deposit Pending
+                        "0",                                    # K: Liq Pending
+                        "0",                                    # L: Liq Approved
+                        "0",                                    # M: Initial Investment
+                        "0",                                    # N: Units_Fund
+                        "0",                                    # O: Units_Quant
+                        "",                                     # P: Last Login
+                        "",                                     # Q: Last_Page
+                        "0"                                     # R: Onboarded
+                    ]
+                    
+                    with st.spinner(f"Creating profile for {n_name}..."):
+                        success = append_to_gsheet("Members", new_row)
+                    
+                    if success:
+                        st.success(f"✅ User **{n_name}** created successfully!")
+                        time.sleep(1.5)
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to write to Google Sheets.")
                 else:
-                    st.write("No votes cast yet.")
-        pass
+                    st.warning("⚠️ Name and Password are required.")
+
+    # ==========================================
+    # SECTION 3: TREASURY (INTERACTIVE)
+    # ==========================================
+    elif choice == "💰 Treasury":
+        st.subheader("Liquidity Management")
+        
+        # 1. Overview Metrics
+        total_liq_req = 0.0
+        total_dep_req = 0.0
+        
+        # Safe float converter
+        def clean_float(x):
+            try:
+                return float(str(x).replace(',', '').replace('€', ''))
+            except:
+                return 0.0
+
+        # Filter Data
+        df_deps = pd.DataFrame()
+        df_liqs = pd.DataFrame()
+
+        if not members.empty:
+            if 'liq_pending' in members.columns:
+                members['liq_pending_val'] = members['liq_pending'].apply(clean_float)
+                total_liq_req = members['liq_pending_val'].sum()
+                df_liqs = members[members['liq_pending_val'] > 0]
+            
+            if 'deposit_pending' in members.columns:
+                members['deposit_pending_val'] = members['deposit_pending'].apply(clean_float)
+                total_dep_req = members['deposit_pending_val'].sum()
+                df_deps = members[members['deposit_pending_val'] > 0]
+
+        # Top Stats
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Pending Deposits", f"€{total_dep_req:,.2f}")
+        m2.metric("Pending Withdrawals", f"€{total_liq_req:,.2f}", delta_color="inverse")
+        m3.metric("Net Cash Flow", f"€{total_dep_req - total_liq_req:,.2f}")
+        
+        st.divider()
+
+        # 2. DEPOSIT APPROVALS
+        st.write("##### 📥 Deposit Requests")
+        if not df_deps.empty:
+            for i, row in df_deps.iterrows():
+                with st.container():
+                    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+                    c1.write(f"**{row['n']}** ({row['email']})")
+                    c2.write(f"€{row['deposit_pending_val']:.2f}")
+                    
+                    # APPROVE
+                    if c3.button("✅ Accept", key=f"acc_dep_{row['u']}"): # Key can stay unique using 'u'
+                        with st.spinner("Processing..."):
+                            # CHANGED: Passing row['n'] (Full Name) instead of row['u']
+                            ok, msg = process_financial_transaction(
+                                row['n'], "DEPOSIT", row['deposit_pending_val'], nav_f, nav_q
+                            )
+                        if ok:
+                            st.success(msg); time.sleep(1); st.cache_data.clear(); st.rerun()
+                        else:
+                            st.error(msg)
+
+                    # REJECT
+                    if c4.button("❌ Decline", key=f"rej_dep_{row['u']}"):
+                        # CHANGED: Passing row['n']
+                        ok, msg = reject_financial_request(row['n'], "DEPOSIT")
+                        if ok:
+                            st.warning(msg); time.sleep(1); st.cache_data.clear(); st.rerun()
+                        else:
+                            st.error(msg)
+        else:
+            st.success("No pending deposits.")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # 3. WITHDRAWAL APPROVALS
+        st.write("##### 📤 Withdrawal Requests")
+        if not df_liqs.empty:
+            for i, row in df_liqs.iterrows():
+                with st.container():
+                    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+                    c1.write(f"**{row['n']}**")
+                    c2.write(f"€{row['liq_pending_val']:.2f}")
+                    
+                    # APPROVE
+                    if c3.button("✅ Approve", key=f"acc_liq_{row['u']}"):
+                        st.toast("⚠️ Remember to wire funds manually!")
+                        with st.spinner("Processing..."):
+                            # CHANGED: Passing row['n']
+                            ok, msg = process_financial_transaction(
+                                row['n'], "WITHDRAWAL", row['liq_pending_val'], nav_f, nav_q
+                            )
+                        if ok:
+                            st.success(msg); time.sleep(1); st.cache_data.clear(); st.rerun()
+                        else:
+                            st.error(msg)
+
+                    # REJECT
+                    if c4.button("❌ Reject", key=f"rej_liq_{row['u']}"):
+                        # CHANGED: Passing row['n']
+                        ok, msg = reject_financial_request(row['n'], "WITHDRAWAL")
+                        if ok:
+                            st.warning(msg); time.sleep(1); st.cache_data.clear(); st.rerun()
+                        else:
+                            st.error(msg)
+        else:
+            st.success("No pending withdrawals.")
+                
+    # ==========================================
+    # SECTION 4: GOVERNANCE & VOTING (FIXED)
+    # ==========================================
+    elif choice == "🗳️ Governance":
+        st.subheader("Governance Command")
+        
+        tab_view, tab_new = st.tabs(["🔴 Active Votes", "📝 New Proposal"])
+        
+        # 1. FIX: Ensure props is a DataFrame
+        if isinstance(props, list):
+            props = pd.DataFrame(props)
+
+        # 2. SUB-TAB 1: MANAGE ACTIVE VOTES
+        with tab_view:
+            # Check if DF is empty and has required 'Applied' column
+            if not props.empty and 'Applied' in props.columns:
+                
+                # Convert 'Applied' to numeric to safely filter (0 vs "0")
+                props['Applied'] = pd.to_numeric(props['Applied'], errors='coerce').fillna(0)
+                
+                # Filter: Applied == 0 means "Active"
+                active_props = props[props['Applied'] == 0]
+                
+                if not active_props.empty:
+                    for i, row in active_props.iterrows():
+                        # Display: Item Name (e.g., AMD) + ID
+                        title_str = f"🔴 {row.get('Item', 'Unknown')} (ID: {row.get('ID', '?')})"
+                        
+                        with st.expander(title_str, expanded=True):
+                            c1, c2 = st.columns([3, 1])
+                            
+                            with c1:
+                                st.write(f"**Thesis:** {row.get('Description', '')}")
+                                st.caption(f"Dept: {row.get('Dept', 'General')} | Type: {row.get('Type', 'N/A')} | End Date: {row.get('End_Date', 'N/A')}")
+                                
+                                # --- VOTING PROGRESS CALCULATION ---
+                                if not df_votes.empty:
+                                    # 1. Identify the correct column for Proposal ID
+                                    # Common variations to check
+                                    possible_cols = ['proposal_id', 'Proposal_ID', 'Proposal ID', 'ID', 'pid']
+                                    id_col = next((c for c in possible_cols if c in df_votes.columns), None)
+                                    
+                                    # 2. Identify the correct column for the Vote (Yes/No)
+                                    vote_col = next((c for c in ['vote', 'Vote', 'choice', 'Choice'] if c in df_votes.columns), None)
+
+                                    if id_col and vote_col:
+                                        # Filter votes for this specific proposal ID
+                                        # We convert both to string to ensure matching works
+                                        these_votes = df_votes[df_votes[id_col].astype(str) == str(row['ID'])]
+                                        
+                                        # Count Yes/No (Case-insensitive)
+                                        yes = len(these_votes[these_votes[vote_col].astype(str).str.upper() == 'YES'])
+                                        no = len(these_votes[these_votes[vote_col].astype(str).str.upper() == 'NO'])
+                                        total = yes + no
+                                        
+                                        if total > 0:
+                                            st.progress(yes/total, text=f"YES: {yes} | NO: {no}")
+                                        else:
+                                            st.info("No votes yet.")
+                                    else:
+                                        # Debugging Info if columns are missing
+                                        st.warning(f"Vote Data Error: Could not find columns. Available: {list(df_votes.columns)}")
+                                else:
+                                    st.info("No votes recorded in database.")
+
+                            with c2:
+                                st.write("#### Action")
+                                # Close Voting Button
+                                if st.button("🏁 Close Vote", key=f"close_{row['ID']}"):
+                                    with st.spinner("Closing..."):
+                                        # Set Applied = 1
+                                        ok, msg = update_proposal_status(row['ID'], 1)
+                                        
+                                    if ok:
+                                        st.success("Vote Closed!")
+                                        time.sleep(1)
+                                        st.cache_data.clear()
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Error: {msg}")
+                else:
+                    st.success("No active proposals (All marked as Applied/1).")
+            else:
+                st.info("No proposals found in database.")
+
+        # 3. SUB-TAB 2: CREATE NEW PROPOSAL
+        with tab_new:
+            st.write("##### Draft New Proposal")
+            with st.form("new_prop_form"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    p_dept = st.selectbox("Department", ["Fundamental", "Quant", "Board"])
+                    p_item = st.text_input("Item / Ticker", placeholder="e.g. AMD")
+                with c2:
+                    p_type = st.selectbox("Type", ["BUY", "SELL", "REBALANCE", "MODEL_DEPLOY"])
+                    p_date = st.date_input("Voting Deadline", value=datetime.now() + timedelta(days=7))
+                
+                p_desc = st.text_area("Description / Thesis")
+                
+                if st.form_submit_button("🚀 Publish Proposal", type="primary"):
+                    if p_item and p_desc:
+                        with st.spinner("Publishing..."):
+                            # Match your sheet columns exactly
+                            success = create_new_proposal(
+                                p_dept, 
+                                p_type, 
+                                p_item, 
+                                p_desc, 
+                                p_date.strftime("%Y-%m-%d")
+                            )
+                            
+                        if success:
+                            st.success("✅ Proposal Live!")
+                            time.sleep(1.5)
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error("Failed to write to Google Sheet.")
+                    else:
+                        st.warning("Please fill in Item and Description.")
+
+    # ==========================================
+    # SECTION 5: SYSTEM & DIAGNOSTICS
+    # ==========================================
+    elif choice == "⚙ System":
+        st.subheader("System Diagnostics")
+        
+        c1, c2 = st.columns(2)
+        
+        with c1:
+            st.write("#### 🧹 Cache Control")
+            st.info("If Google Sheet updates aren't showing, click this.")
+            
+            if st.button("🗑 Force Clear Cache", type="primary", use_container_width=True):
+                st.cache_data.clear()
+                st.toast("Cache Cleared! Reloading...")
+                time.sleep(1)
+                st.rerun()
+                
+            st.divider()
+            
+            st.write("#### 📊 App Health")
+            st.json({
+                "App Version": "TIC_Portal v2.1",
+                "User": user.get('n', 'Unknown'),
+                "Role": user.get('admin', 'False'),
+                "Session ID": str(id(st.session_state))[:8]
+            })
+
+        with c2:
+            st.write("#### 🕵️ Session Inspector")
+            st.caption("Current variables in memory (for debugging):")
+            
+            # Safe display of session state (excluding huge dataframes)
+            debug_state = {k: v for k, v in st.session_state.items() 
+                          if not isinstance(v, pd.DataFrame)}
+            st.json(debug_state)
+
+    # Closing logic for the Admin Panel function
+    return
 
 def get_market_status():
     """Calculates the open/closed status for key global markets in CET."""
@@ -2491,12 +2825,12 @@ def render_ticker_tape(data_dict):
             color = "#AAAAAA" # Grey
             arrow = "➖"
             
-        # Format: AAPL 150.20 ▲ +1.2%
+        # Format: AAPL 150.20 ▲ +1.25%
         ticker_content += f"""
         <span style="margin-right: 30px; color: var(--text-color); font-weight: bold; font-family: 'Courier New', monospace;">
             {ticker} 
             <span style="color: {color}; margin-left:5px;">
-                {price} {arrow} {pct:+.1f}%
+                {price:,.2f} {arrow} {pct:+.2f}% 
             </span>
         </span>
         """
@@ -2698,217 +3032,155 @@ def render_offboarding(user):
             
 
 def render_risk_macro_dashboard(f_port, q_port):
-    st.title("⚠️ Risk & Macro Observatory")
+    st.title("⚠ Risk & Quantitative Analysis")
+    st.caption("Advanced metrics for portfolio hedging and forecasting.")
+
+    # 1. AGGREGATE PORTFOLIOS
+    # Combine tickers from Fund and Quant for holistic risk view
+    tickers = []
+    if not f_port.empty and 'ticker' in f_port.columns:
+        tickers.extend(f_port['ticker'].tolist())
+    if not q_port.empty and 'ticker' in q_port.columns:
+        tickers.extend(q_port['ticker'].tolist())
     
-    # 1. Define Tabs (Same as before)
-    tabs = ["Correlation Matrix","Value at Risk (VaR)","Macro Indicators", "Market News"]
-    
-    # 2. State Logic (Use session state to preserve the tab choice)
-    if 'risk_active_tab' not in st.session_state: st.session_state['risk_active_tab'] = tabs[0]
-    try: curr_index = tabs.index(st.session_state['risk_active_tab'])
-    except: curr_index = 0
-    active_tab = st.radio("Risk View", tabs, index=curr_index, horizontal=True, label_visibility="collapsed")
-    st.session_state['risk_active_tab'] = active_tab
-    st.divider()
+    # Remove Cash/NaN
+    tickers = [t for t in list(set(tickers)) if "CASH" not in str(t).upper() and str(t) != 'nan']
 
-    # --- TAB 1: CORRELATION MATRIX ---
-    if active_tab == "Correlation Matrix":
-        st.subheader("Portfolio Correlation (Live)")
+    # --- TABS FOR TOOLS ---
+    tab_corr, tab_mc, tab_vol = st.tabs(["🔥 Correlation Matrix", "🔮 Monte Carlo", "🌊 Volatility Surface"])
+
+    # ==========================================
+    # TAB 1: CORRELATION MATRIX
+    # ==========================================
+    with tab_corr:
+        st.subheader("Concentration Risk Analysis")
+        st.caption("Darker red = Higher correlation. Avoid holding too many highly correlated assets.")
         
-        # Radio to switch between views (Needs a unique key since it's a dedicated radio button)
-        view_mode = st.radio("Select Portfolio View:", ["Fundamental Assets", "Quant Assets"], horizontal=True, key="corr_view_select")
-        
-        target_df = f_port if view_mode == "Fundamental Assets" else q_port
-        
-        if not target_df.empty:
-            if 'ticker' in target_df.columns:
-                col_name = 'ticker'
-            elif 'model_id' in target_df.columns:
-                col_name = 'model_id'
-            else:
-                col_name = None
-                
-            if col_name:
-                my_tickers = [t for t in target_df[col_name].unique() if isinstance(t,str) and "CASH" not in t.upper()]
-                
-                if len(my_tickers) > 1:
-                    with st.spinner(f"Calculating correlations for {len(my_tickers)} assets..."):
-                        corr_matrix = fetch_correlation_data(my_tickers)
-                    
-                    if not corr_matrix.empty:
-                        st.plotly_chart(
-                            px.imshow(corr_matrix, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r", zmin=-1, zmax=1), 
-                            use_container_width=True
-                        )
-                        
-                        st.divider()
-                        st.subheader("🧠 Risk Analysis")
-                        high_risk = []
-                        hedges = []
-                        
-                        cols = corr_matrix.columns
-                        for i in range(len(cols)):
-                            for j in range(i+1, len(cols)):
-                                val = corr_matrix.iloc[i, j]
-                                pair = f"{cols[i]} ↔ {cols[j]}"
-                                if val > 0.85: high_risk.append(f"{pair} ({val:.2f})")
-                                elif val < -0.5: hedges.append(f"{pair} ({val:.2f})")
-                        
-                        c_warn, c_info = st.columns(2)
-                        with c_warn:
-                            if high_risk: st.error(f"🚨 **Critical Concentration ({len(high_risk)} pairs)**")
-                            else: st.success("✅ No critical concentration (>0.85).")
-                            
-                        with c_info:
-                            if hedges: st.info(f"🛡️ **Natural Hedges ({len(hedges)} pairs)**")
-                            else: st.write("No strong negative correlations.")
-
-                else: st.info("Not enough assets to calculate correlation (Need 2+).")
-            else: st.warning("Could not identify Ticker column.")
-        else: st.warning("Portfolio is empty.")
-    
-    elif active_tab == "Value at Risk (VaR)":
-        st.subheader("🛡️ Portfolio Historical VaR (95%)")
-        st.caption("Estimating potential loss based on the last 1 year of historical data for current holdings.")
-        
-        # 1. Combine Portfolios for Calculation
-        combined_tickers = []
-        weights = {}
-        total_aum = 0
-        
-        # Process Fundamental
-        if not f_port.empty and 'ticker' in f_port.columns:
-            for _, row in f_port.iterrows():
-                t = str(row.get('ticker'))
-                v = float(row.get('market_value', 0))
-                if "CASH" not in t.upper() and v > 0:
-                    combined_tickers.append(t)
-                    weights[t] = weights.get(t, 0) + v
-                    total_aum += v
-                    
-        # Process Quant
-        if not q_port.empty:
-            col = 'model_id' if 'model_id' in q_port.columns else 'ticker'
-            for _, row in q_port.iterrows():
-                t = str(row.get(col, ''))
-                v = float(row.get('market_value', 0))
-                if t and "CASH" not in t.upper() and v > 0:
-                    combined_tickers.append(t)
-                    weights[t] = weights.get(t, 0) + v
-                    total_aum += v
-
-        # 2. Fetch Data with Safety Checks
-        if combined_tickers and total_aum > 0:
-            unique_tickers = list(set(combined_tickers))
-            with st.spinner("Calculating Historical VaR..."):
-                try:
-                    # Download history
-                    data_raw = yf.download(unique_tickers, period="1y", progress=False)
-                    
-                    # Check if data is empty or corrupted
-                    if data_raw.empty:
-                        st.warning("⚠️ Could not fetch historical data. API might be rate-limited.")
-                        return
-
-                    # Handle single ticker vs multiple tickers structure
-                    if len(unique_tickers) == 1:
-                        data = data_raw['Close'].to_frame() if 'Close' in data_raw else pd.DataFrame()
-                        data.columns = unique_tickers # Rename col to ticker
-                    else:
-                        data = data_raw['Close']
-                        
-                    if data.empty:
-                        st.warning("⚠️ No 'Close' price data available.")
-                        return
-
-                    # Calculate Returns
-                    returns = data.pct_change().dropna()
-                    
-                    if returns.empty:
-                        st.warning("⚠️ Not enough historical data points to calculate VaR.")
-                        return
-
-                    # Calculate Portfolio Returns (Weighted)
-                    # Filter weights to only include tickers we actually got data for
-                    valid_tickers = [t for t in returns.columns if t in weights]
-                    
-                    if not valid_tickers:
-                        st.warning("⚠️ No matching data found for your tickers.")
-                        return
-
-                    w_vector = [weights[t]/total_aum for t in valid_tickers]
-                    
-                    # Dot product: Matrix of returns * Weights
-                    port_returns = returns[valid_tickers].dot(w_vector)
-                    
-                    # 3. Calculate Stats
-                    confidence_level = 0.95
-                    var_95 = np.percentile(port_returns, (1 - confidence_level) * 100)
-                    cvar_95 = port_returns[port_returns <= var_95].mean()
-                    
-                    # Convert to currency
-                    var_val = total_aum * var_95
-                    cvar_val = total_aum * cvar_95
-                    
-                    # 4. Display Metrics
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Daily VaR (95%)", f"€{var_val:,.2f}", f"{var_95*100:.2f}%")
-                    c2.metric("Daily CVaR (Expected Tail Loss)", f"€{cvar_val:,.2f}", f"{cvar_95*100:.2f}%")
-                    c3.metric("Calculation Base", f"{len(valid_tickers)} Assets", "1 Year History")
-                    
-                    # 5. Visualization (Histogram)
-                    fig_hist = px.histogram(
-                        port_returns, 
-                        nbins=50, 
-                        title="Distribution of Daily Portfolio Returns",
-                        labels={'value': 'Daily Return'},
-                        color_discrete_sequence=['#444444']
-                    )
-                    # Add VaR Line
-                    fig_hist.add_vline(x=var_95, line_width=3, line_dash="dash", line_color="#FF4444", annotation_text="VaR 95%")
-                    st.plotly_chart(fig_hist, use_container_width=True)
-                    
-                except Exception as e:
-                    st.error(f"VaR Calculation failed: {e}")
-        else:
-            st.warning("No active assets found in portfolio to calculate VaR.")
-    
-    # --- TAB 2: MACRO INDICATORS ---
-    elif active_tab == "Macro Indicators":
-        st.subheader("Global Markets")
-        macro = fetch_macro_data()
-        c1, c2, c3, c4 = st.columns(4)
-        
-        def show(col, lbl, k, fmt="%.2f"):
-            d = macro.get(k, {}); curr = d.get('value', 0); delta = d.get('delta', 0)
-            col.metric(lbl, fmt % curr, f"{delta:.2f}")
+        if tickers:
+            with st.spinner("Calculating correlations..."):
+                corr_matrix = fetch_correlation_data(tickers)
             
-        show(c1, "🇺🇸 10Y Yield", '10Y Treasury', "%.2f%%")
-        show(c2, "😨 VIX Index", 'VIX')
-        show(c3, "💶 EUR/USD", 'EUR/USD', "%.4f")
-        show(c4, "🛢️ Crude Oil", 'Crude Oil', "$%.2f")
-
-    # --- TAB 3: MARKET NEWS ---
-    elif active_tab == "Market News":
-        st.subheader("Market Intelligence")
-        news = fetch_macro_news()
-        
-        if not news:
-            st.warning("RSS Feed unavailable or empty.")
+            if not corr_matrix.empty:
+                # Use Plotly for interactive Heatmap
+                fig = px.imshow(
+                    corr_matrix, 
+                    text_auto=".2f",
+                    aspect="auto",
+                    color_continuous_scale="RdBu_r", # Red = High Corr, Blue = Low/Negative
+                    zmin=-1, zmax=1
+                )
+                st.plotly_chart(fig, width="stretch")
+            else:
+                st.warning("Not enough data to build correlation matrix.")
         else:
-            c_news1, c_news2 = st.columns(2)
-            for i, item in enumerate(news):
-                col = c_news1 if i % 2 == 0 else c_news2
-                with col:
-                    # FIX: Used markdown to render HTML with the link
-                    st.markdown(f"""
-                    <div class="news-item">
-                        <div class="news-source">{item['source']} | {item['published']}</div>
-                        <a class="news-head" href="{item['link']}" target="_blank">{item['title']}</a>
-                        <div class="news-sum">{item['summary']}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+            st.info("No assets found in portfolio.")
+
+    # ==========================================
+    # TAB 2: MONTE CARLO SIMULATION
+    # ==========================================
+    with tab_mc:
+        st.subheader("Projected Fund Performance (1 Year)")
+        
+        # 1. Setup Defaults
+        default_vol = 0.15
+        
+        # 2. Controls
+        col_mc1, col_mc2 = st.columns([1, 3])
+        with col_mc1:
+            # A. AUTO-CALCULATE BUTTON
+            if st.button("⚡ Use Real Volatility", help="Calculate volatility based on current holdings"):
+                real_vol = calculate_real_portfolio_volatility(f_port, q_port)
+                st.session_state['calc_vol'] = real_vol
+                st.toast(f"✅ Calculated Real Volatility: {real_vol*100:.1f}%")
+            
+            # Use calculated value if it exists, otherwise default
+            vol_input = st.session_state.get('calc_vol', default_vol)
+            
+            # Inputs
+            start_val = st.number_input("Starting Capital (€)", value=100000)
+            
+            # The Slider (Defaults to the calculated value)
+            sim_vol = st.slider("Portfolio Volatility (%)", 5.0, 50.0, float(vol_input*100), 0.1) / 100
+            
+            n_sims = st.selectbox("Simulations", [200, 500, 1000], index=1)
+            
+            st.divider()
+            
+            if st.button("▶ Run Simulation", type="primary"):
+                paths = run_monte_carlo(start_val, sim_vol, simulations=n_sims)
                 
+                # Calculate Stats
+                end_values = paths[-1]
+                median_outcome = np.median(end_values)
+                p95 = np.percentile(end_values, 95)
+                p05 = np.percentile(end_values, 5)
+                
+                st.session_state['mc_paths'] = paths
+                st.session_state['mc_stats'] = (median_outcome, p95, p05)
+
+        # 3. Visualization
+        with col_mc2:
+            if 'mc_paths' in st.session_state:
+                paths = st.session_state['mc_paths']
+                med, high, low = st.session_state['mc_stats']
+                
+                # Plot 100 random paths to avoid clutter
+                subset = paths[:, :100]
+                fig = px.line(subset, render_mode='webgl')
+                fig.update_layout(
+                    showlegend=False, 
+                    title=f"Monte Carlo: 1,000 Paths @ {sim_vol*100:.1f}% Volatility",
+                    xaxis_title="Trading Days",
+                    yaxis_title="Portfolio Value (€)",
+                    height=500
+                )
+                st.plotly_chart(fig, width="stretch")
+                
+                # Stats Metrics
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Bear Case (Bottom 5%)", f"€{low:,.0f}", delta=None, delta_color="normal")
+                m2.metric("Base Case (Median)", f"€{med:,.0f}")
+                m3.metric("Bull Case (Top 5%)", f"€{high:,.0f}")
+            else:
+                st.info("👈 Click 'Run Simulation' to start.")
+
+    # ==========================================
+    # TAB 3: VOLATILITY SURFACE
+    # ==========================================
+    with tab_vol:
+        st.subheader("Options Implied Volatility")
+        v_ticker = st.text_input("Enter Ticker for Vol Surface:", value="NVDA").upper()
+        
+        if v_ticker:
+            if st.button("Build Surface"):
+                with st.spinner(f"Fetching option chains for {v_ticker}..."):
+                    df_vol = get_volatility_surface(v_ticker)
+                
+                if not df_vol.empty:
+                    # 3D Surface Plot
+                    fig = go.Figure(data=[go.Mesh3d(
+                        x=df_vol['Strike'],
+                        y=df_vol['Days'],
+                        z=df_vol['IV'],
+                        intensity=df_vol['IV'],
+                        colorscale='Viridis',
+                        opacity=0.8
+                    )])
+                    
+                    fig.update_layout(
+                        title=f"{v_ticker} Implied Volatility Surface",
+                        scene=dict(
+                            xaxis_title='Strike Price',
+                            yaxis_title='Days to Expiration',
+                            zaxis_title='Implied Volatility'
+                        ),
+                        margin=dict(l=0, r=0, b=0, t=30),
+                        height=600
+                    )
+                    st.plotly_chart(fig, width="stretch")
+                else:
+                    st.error("Could not fetch options data. Ticker might not have liquid options.")
+
 def render_fundamental_dashboard(user, portfolio, proposals):
     st.title(f"📈 Fundamental Dashboard")
     
@@ -2916,7 +3188,7 @@ def render_fundamental_dashboard(user, portfolio, proposals):
     with st.expander("📊 View Raw Portfolio Data"):
         st.dataframe(
             portfolio,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "market_value": st.column_config.NumberColumn(
@@ -2950,49 +3222,78 @@ def render_fundamental_dashboard(user, portfolio, proposals):
         fig.update_layout(title="Portfolio Performance History", yaxis_title="Rebased (100)", legend_title=None)
         
         # RENDER CHART INSIDE THE IF BLOCK
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     else:
         st.warning("Not enough historical data to generate performance chart.")
     
     # 3. ALLOCATION & SECTOR ANALYSIS
     c1, c2 = st.columns([1, 2])
+    
+    # --- PRE-CALCULATION: GET MARKET VALUE ---
+    if not portfolio.empty and 'units' in portfolio.columns and 'ticker' in portfolio.columns:
+        # 1. Fetch Prices
+        tickers = portfolio['ticker'].dropna().unique().tolist()
+        live_data = fetch_live_prices_with_change(tickers)
+        
+        # 2. Map Prices
+        def get_price(t):
+            return live_data.get(str(t), {}).get('price', 0.0)
+            
+        portfolio['current_price'] = portfolio['ticker'].map(get_price)
+
+        # --- THE FIX IS HERE: Force data to be Numeric ---
+        # "errors='coerce'" turns non-numbers (like text) into NaN (0.0)
+        portfolio['units'] = pd.to_numeric(portfolio['units'], errors='coerce').fillna(0.0)
+        portfolio['current_price'] = pd.to_numeric(portfolio['current_price'], errors='coerce').fillna(0.0)
+
+        # 3. Calculate Market Value (Now it works because both are numbers)
+        portfolio['market_value'] = portfolio['units'] * portfolio['current_price']
+        
+        # 4. Get Real Return
+        portfolio['real_return'] = portfolio['ticker'].map(
+            lambda t: live_data.get(str(t), {}).get('pct', 0.0)
+        )
+    else:
+        portfolio['market_value'] = 0.0
+        portfolio['real_return'] = 0.0
+
     with c1:
         st.subheader("Allocation")
-        if not portfolio.empty:
-            fig_pie = px.pie(portfolio, values='target_weight', names='sector', hole=0.4)
-            st.plotly_chart(fig_pie, use_container_width=True)
+        if not portfolio.empty and portfolio['market_value'].sum() > 0:
+            # Handle capitalization (Sector vs sector)
+            sec_col = 'Sector' if 'Sector' in portfolio.columns else 'sector'
+            
+            fig_pie = px.pie(
+                portfolio, 
+                values='market_value', 
+                names=sec_col, 
+                hole=0.4
+            )
+            st.plotly_chart(fig_pie, width="stretch")
         else:
-            st.info("No assets to display.")
+            st.info("No market value to display.")
 
     with c2:
         st.subheader("Sector Performance")
-        # --- REAL DATA LOGIC ---
-        if not portfolio.empty and 'ticker' in portfolio.columns:
-            # 1. Get tickers (excluding Cash)
-            tickers = portfolio['ticker'].dropna().unique().tolist()
+        if not portfolio.empty and portfolio['market_value'].sum() > 0:
+            sec_col = 'Sector' if 'Sector' in portfolio.columns else 'sector'
             
-            # 2. Fetch Real Change % (cached)
-            live_data = fetch_live_prices_with_change(tickers)
-            
-            # 3. Map the 'pct' change to the dataframe
-            # Use a safe lambda to avoid errors if ticker missing
-            portfolio['real_return'] = portfolio['ticker'].map(
-                lambda t: live_data.get(str(t), {}).get('pct', 0.0)
-            )
-            
-            # 4. Plot Treemap
             fig_tree = px.treemap(
                 portfolio, 
-                path=[px.Constant("Portfolio"), 'sector', 'ticker'], 
-                values='target_weight', 
+                path=[px.Constant("Portfolio"), sec_col, 'ticker'], 
+                values='market_value',
                 color='real_return',
-                color_continuous_scale='RdYlGn', # Red to Green
-                color_continuous_midpoint=0,     # 0% is center
-                hover_data=['real_return']
+                color_continuous_scale='RdYlGn',
+                color_continuous_midpoint=0,
+                hover_data=['real_return', 'market_value']
             )
             
-            fig_tree.update_traces(hovertemplate='<b>%{label}</b><br>Weight: %{value:.1%}<br>Change: %{customdata[0]:.2f}%')
-            st.plotly_chart(fig_tree, use_container_width=True)
+            fig_tree.update_traces(
+                hovertemplate='<b>%{label}</b><br>Value: €%{value:,.0f}<br>Change: %{customdata[0]:.2f}%'
+            )
+            st.plotly_chart(fig_tree, width="stretch")
+        else:
+            st.info("No data for Treemap.")
 
     # 4. CONCENTRATION CHECK
     if not portfolio.empty and 'target_weight' in portfolio.columns:
@@ -3007,22 +3308,6 @@ def render_fundamental_dashboard(user, portfolio, proposals):
             else:
                 st.success(f"✅ Portfolio is well-diversified. Top sector: {top_sector} ({top_weight:.1%})")
     
-    st.divider()
-    
-    # 5. ACTIVE PROPOSALS
-    st.header("🗳️ Active Proposals")
-    current_props = [p for p in proposals if p.get('Dept') == 'Fundamental']
-    
-    if not current_props:
-        st.info("No active proposals for Fundamental department.")
-
-    for p in current_props:
-        with st.container(border=True):
-            c_a, c_b = st.columns([4, 1])
-            c_a.subheader(f"{p.get('Type')}: {p.get('Item')}")
-            c_a.write(p.get('Description'))
-            c_a.caption(f"Closes: {p.get('End_Date')}")
-            c_b.metric("Votes", "TBD")
             
 def render_quant_dashboard(user, portfolio, proposals):
     st.title(f"🤖 Quant Lab")
@@ -3054,7 +3339,7 @@ def render_quant_dashboard(user, portfolio, proposals):
                 
                 st.dataframe(
                     grouped,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         model_col: st.column_config.TextColumn("Strategy"),
@@ -3074,7 +3359,7 @@ def render_quant_dashboard(user, portfolio, proposals):
                 # Filter out zero values for cleaner chart
                 chart_data = portfolio[portfolio['market_value'] > 0]
                 fig = px.pie(chart_data, values='market_value', names=group_col, hole=0.4)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
     # --- 3. DETAILED HOLDINGS ---
     st.divider()
@@ -3086,7 +3371,7 @@ def render_quant_dashboard(user, portfolio, proposals):
         
         st.dataframe(
             portfolio[valid_cols],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "market_value": st.column_config.NumberColumn("Value", format="€%.2f"),
@@ -3095,45 +3380,86 @@ def render_quant_dashboard(user, portfolio, proposals):
         )
         
     st.divider()
-    # MONTE CARLO SIMULATION
-    st.markdown("### 🎲 Monte Carlo Risk Engine")
-    st.caption("Project future portfolio performance based on random walk simulations (Geometric Brownian Motion).")
-    
-    c_param, c_plot = st.columns([1, 3])
-    
-    with c_param:
-        st.write("**Settings**")
-        n_sims = st.slider("Simulations", 10, 100, 50)
-        horizon = st.slider("Horizon (Days)", 30, 365, 252)
-        mu = st.slider("Expected Return", -10, 30, 8) / 100
-        sigma = st.slider("Volatility", 5, 50, 15) / 100
-        
-    with c_plot:
-        dt = 1/252
-        S0 = 100
-        dates = pd.date_range(start=datetime.now(), periods=horizon+1)
-        sim_data = {'Date': dates}
-        
-        for i in range(n_sims):
-            Z = np.random.normal(0, 1, horizon)
-            daily_returns = np.exp((mu - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z)
-            daily_returns = np.insert(daily_returns, 0, 1.0)
-            sim_data[f'Sim_{i}'] = S0 * np.cumprod(daily_returns)
-            
-        df_mc = pd.DataFrame(sim_data).melt(id_vars='Date', var_name='Sim', value_name='Value')
-        
-        fig = px.line(df_mc, x='Date', y='Value', color='Sim', 
-                     color_discrete_sequence=px.colors.qualitative.Pastel)
-        fig.update_layout(showlegend=False, xaxis_title=None, yaxis_title="Value (Base 100)")
-        fig.update_traces(opacity=0.5, line=dict(width=1))
-        st.plotly_chart(fig, use_container_width=True)
+    st.subheader("🐋 Whale Watcher (Institutional Flow)")
+    st.caption("Analyzing institutional ownership of current portfolio assets.")
 
-        # Stats
-        final_vals = df_mc[df_mc['Date'] == dates[-1]]['Value']
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Median", f"{final_vals.median():.0f}")
-        c2.metric("Worst Case (5%)", f"{np.percentile(final_vals, 5):.0f}")
-        c3.metric("Best Case (95%)", f"{np.percentile(final_vals, 95):.0f}")
+    # 1. IDENTIFY THE CORRECT COLUMN (The Fix)
+    # Check if we have 'ticker' OR 'model_id' (which is what Quant often uses)
+    t_col = 'ticker'
+    if 'model_id' in portfolio.columns:
+        t_col = 'model_id'
+
+    # 2. CHECK IF DATA EXISTS
+    if not portfolio.empty and t_col in portfolio.columns:
+        # Filter for stocks (exclude Cash/Crypto)
+        # We use the dynamic 't_col' variable now
+        stocks = [t for t in portfolio[t_col].unique() 
+                 if isinstance(t, str) and "CASH" not in t and "EUR" not in t]
+        
+        whale_data = []
+        
+        # We need a progress bar because this fetches live data
+        prog_bar = st.progress(0, text="Scanning Institutional Data...")
+        
+        for i, t in enumerate(stocks):
+            try:
+                # Fast fetch of single info key
+                info = yf.Ticker(t).info
+                inst_own = info.get('heldPercentInstitutions', 0)
+                short_float = info.get('shortPercentOfFloat', 0)
+                
+                status = "Retail Heavy"
+                if inst_own > 0.8: status = "🐋 Whale Owned (>80%)"
+                elif inst_own > 0.5: status = "🏢 Mixed"
+                
+                whale_data.append({
+                    "Ticker": t,
+                    "Inst. Ownership": inst_own,
+                    "Short Interest": short_float,
+                    "Verdict": status
+                })
+            except:
+                pass
+            
+            # Update progress
+            prog_bar.progress((i + 1) / len(stocks), text=f"Scanning {t}...")
+            
+        prog_bar.empty() # Remove bar when done
+
+        if whale_data:
+            df_whale = pd.DataFrame(whale_data)
+            
+            # 1. SCALE DATA TO 0-100 FOR DISPLAY
+            # We multiply by 100 so 0.68 becomes 68.5, which looks better with the "%" symbol
+            df_whale["Inst. Ownership"] = df_whale["Inst. Ownership"] * 100
+            df_whale["Short Interest"] = df_whale["Short Interest"] * 100
+            
+            # Sort by highest ownership
+            df_whale = df_whale.sort_values("Inst. Ownership", ascending=False)
+            
+            # 2. DISPLAY WITH CORRECT SPRINTF FORMATTING
+            st.dataframe(
+                df_whale,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Inst. Ownership": st.column_config.ProgressColumn(
+                        "Smart Money %", 
+                        # "%.1f" means 1 decimal float. "%%" prints a literal % sign.
+                        format="%.1f%%", 
+                        min_value=0, 
+                        max_value=100
+                    ),
+                    "Short Interest": st.column_config.NumberColumn(
+                        "Short %", 
+                        format="%.2f%%"
+                    )
+                }
+            )
+        else:
+            st.info("No stock data found to analyze.")
+    else:
+        st.info("Add assets to the portfolio to see Whale Analysis.")
         
 def render_documents(user):
     st.title("📚 Library")
@@ -3194,52 +3520,60 @@ def render_documents(user):
 # 5. MAIN
 # ==========================================
 def main():
+    # 1. Init Session State
     if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
     
-    # Unpack everything
+    # 2. Init Cookie Manager
+    cookie_manager = stx.CookieManager()
+    
+    # 3. Load Data
     members, f_port, q_port, props, calendar_events, f_total, q_total, df_votes, nav_f, nav_q, att_df = load_data()
 
+    # 4. AUTO-LOGIN: Check if Cookie Exists
+    if not st.session_state['logged_in']:
+        # Try to get the cookie
+        cookie_user = cookie_manager.get(cookie="tic_user")
+        
+        if cookie_user:
+            # Cookie found! Find the user in our database
+            found_user = get_user_by_username(cookie_user, members)
+            if found_user:
+                st.session_state['user'] = found_user
+                st.session_state['logged_in'] = True
+                st.toast(f"👋 Welcome back, {found_user['n']}!")
+                time.sleep(0.5)
+                st.rerun()
+
+    # 5. SHOW LOGIN SCREEN (If still not logged in)
     if not st.session_state['logged_in']:
         c1, c2, c3 = st.columns([1,1.5,1])
         with c2:
             st.image(TIC_LOGO, width=200)
             st.title("TIC Portal")
-            st.info("Welcome to the Internal Management System")
-
-            st.caption("By logging in, you acknowledge that this portal is for informational purposes only and does not constitute a binding financial statement.")
             
-            # --- NEW: CLEAN, ALWAYS-VISIBLE LOGIN FORM ---
             with st.form("login_form", clear_on_submit=True):
                 st.subheader("Member Login")
-                
                 u = st.text_input("Username", key="login_u")
                 p = st.text_input("Password", type="password", key="login_p")
                 
-                # Create two columns for the buttons
                 c_log, c_guest = st.columns(2)
                 
                 # --- BUTTON 1: MEMBER LOGIN ---
                 if c_log.form_submit_button("Log In", type="primary"):
                     user = authenticate(u, p, members)
                     if user is not None:
+                        # SET THE COOKIE HERE (Expires in 30 days)
+                        cookie_manager.set("tic_user", user['u'], expires_at=datetime.now() + timedelta(days=30))
+                        
                         st.session_state['user'] = user.to_dict()
                         st.session_state['logged_in'] = True
                         
-                        # 1. Track Last Login (Google Sheets)
-                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
-                        update_member_field_in_gsheet(user['u'], "Last Login", timestamp)
-                        
-                        # 2. Time-aware greeting
-                        h = datetime.now().hour
-                        if 5 <= h < 12: greeting = "Good Morning"
-                        elif 12 <= h < 18: greeting = "Good Afternoon"
-                        else: greeting = "Good Evening"
-                        st.toast(f"🚀 {greeting}, {user['n']}!", icon="👋")
-                        
+                        # Track Login
+                        update_member_field_in_gsheet(user['u'], "Last Login", datetime.now().strftime('%Y-%m-%d %H:%M'))
                         st.rerun()
                     else: 
                         st.error("Invalid Username or Password")
-                
+
                 # --- BUTTON 2: GUEST ACCESS ---
                 if c_guest.form_submit_button("Guest Access"):
                     # Create a Fake User Profile
@@ -3316,7 +3650,7 @@ def main():
     with st.sidebar:
         with st.form(key='cli_form', clear_on_submit=True):
             cmd_input = st.text_input("COMMAND >", placeholder="Terminal Engine").upper()
-            submit = st.form_submit_button("GO", use_container_width=True)
+            submit = st.form_submit_button("GO", width="stretch")
             
             if submit and cmd_input:
                 # 1. Navigation Commands
@@ -3353,6 +3687,18 @@ def main():
         
         # TIC LOGO
         st.image(TIC_LOGO, width=150)
+        st.write("")
+        if st.button("📄 Download Weekly Report", use_container_width=True):
+            with st.spinner("Compiling Intelligence Brief..."):
+                # FIX: Changed 'proposals' to 'props'
+                pdf_bytes = create_enhanced_pdf_report(
+                    f_port, q_port, f_total, q_total, nav_f, nav_q, 
+                    "Weekly Update", props
+                )
+                
+            b64 = base64.b64encode(pdf_bytes).decode()
+            href = f'<a href="data:application/octet-stream;base64,{b64}" download="TIC_Intelligence_Brief.pdf" style="text-decoration:none; color:inherit;"><button style="width:100%; padding:0.5rem; background:#D4AF37; color:black; border:none; border-radius:4px; font-weight:bold; cursor:pointer;">📥 Click to Save PDF</button></a>'
+            st.markdown(href, unsafe_allow_html=True)
         st.markdown("---")
         
         # Profile
@@ -3401,28 +3747,53 @@ def main():
                 default_index = i
                 break
         
-        # 3. Render the Navigation
-        nav = st.radio("Navigation", menu, index=default_index)
-        
-        # 4. Background Save (Optimized)
-        clean_nav = nav.split(" (")[0]
-        
-        # Only trigger updates if the page actually changed
-        if clean_nav != st.session_state.get('previous_choice', ''):
-            st.session_state['previous_choice'] = clean_nav
+        # NEW NAVIGATION LOGIC (EASY BROTATO)
+        def on_nav_change():
+            """Callback: Updates state immediately when button is clicked."""
+            new_choice = st.session_state.nav_radio_key
+            clean_choice = new_choice.split(" (")[0]
             
-            # Update local session immediately so it feels instant
-            if user.get('last_page') != clean_nav:
-                st.session_state['user']['last_page'] = clean_nav
-                
-                # THREADING: Send API call to background thread to prevent UI lag
-                if user['r'] != 'Guest':
-                    threading.Thread(
-                        target=update_member_field_in_gsheet, 
-                        args=(user['u'], "Last_Page", clean_nav)
-                    ).start()
+            # 1. Update Session State immediately
+            st.session_state['previous_choice'] = clean_choice
+            
+            # 2. Update Google Sheets (Threaded)
+            if 'user' in st.session_state and st.session_state['user']['r'] != 'Guest':
+                u_name = st.session_state['user']['u']
+                threading.Thread(
+                    target=update_member_field_in_gsheet, 
+                    args=(u_name, "Last_Page", clean_choice)
+                ).start()
+
+        # 3. Render the Navigation with Callback
+        nav = st.radio(
+            "Navigation", 
+            menu, 
+            index=default_index, 
+            key="nav_radio_key", 
+            on_change=on_nav_change
+        )
+        
         st.divider()
-        if st.button("Log Out"): st.session_state.clear(); st.rerun()
+        if st.button("Log Out"):
+            # 1. Safely try to delete the cookie
+            try:
+                cookie_manager.delete("tic_user")
+            except KeyError:
+                pass # Cookie was already gone, ignore the error
+            except Exception as e:
+                print(f"Cookie Error: {e}") # Log other errors but don't crash
+
+            # 2. Clear internal session state
+            st.session_state['logged_in'] = False
+            if 'user' in st.session_state:
+                del st.session_state['user']
+            
+            # 3. Delay slightly to let browser catch up
+            st.toast("Logging out...")
+            time.sleep(1.0)
+            
+            # 4. Restart
+            st.rerun()
         
         # SYSTEM STATUS
         st.caption(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
@@ -3444,35 +3815,36 @@ def main():
         render_launchpad(user, f_total, q_total, nav_f, nav_q, f_port, q_port, calendar_events)
         
     elif "Dashboard" in nav:
-        # 1. BOARD, ADVISORY, AND GUESTS (See Both)
+        # 1. GUESTS / BOARD / ADVISORY (See Everything)
         if user['d'] in ['Board', 'Advisory'] or user['r'] == 'Guest':
-            st.title("🏛️ Executive Overview (Guest View)" if user['r'] == 'Guest' else "🏛️ Executive Overview")
-            
-            if user['r'] == 'Guest':
-                st.info("👀 You are viewing the live portfolio in Read-Only mode.")
+            st.title("🏛️ Executive Overview")
             
             t_fund, t_quant = st.tabs(["📈 Fundamental", "🤖 Quant"])
             
             with t_fund: 
                 render_fundamental_dashboard(user, f_port, props)
                 st.divider()
+                # Fundamental Tab shows Fundamental + Board votes
                 render_voting_section(user, props, df_votes, "Fundamental")
                 
             with t_quant: 
                 render_quant_dashboard(user, q_port, props)
                 st.divider()
+                # Quant Tab shows Quant + Board votes
                 render_voting_section(user, props, df_votes, "Quant")
 
-        # 2. QUANT TEAM (See Quant Only)
+        # 2. QUANT TEAM (Specific View)
         elif user['d'] == 'Quant': 
             render_quant_dashboard(user, q_port, props)
             st.divider()
+            # Shows Quant + Board
             render_voting_section(user, props, df_votes, "Quant")
             
-        # 3. FUNDAMENTAL / GENERAL (See Fundamental Only)
+        # 3. FUNDAMENTAL TEAM (Specific View)
         else: 
             render_fundamental_dashboard(user, f_port, props)
             st.divider()
+            # Shows Fundamental + Board
             render_voting_section(user, props, df_votes, "Fundamental")
             
     elif "Risk & Macro" in nav: render_risk_macro_dashboard(f_port, q_port)

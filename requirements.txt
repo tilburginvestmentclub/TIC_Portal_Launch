@@ -8,3 +8,6 @@ feedparser
 openpyxl
 gspread
 oauth2client
+google-auth
+toml
+ib_insync

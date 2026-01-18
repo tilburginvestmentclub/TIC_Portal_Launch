@@ -1,12 +1,19 @@
-# Python Caching and Environment
+# --- Python & Environment ---
 __pycache__/
 *.pyc
 venv/
 .venv/
 
-# Streamlit Local Cache
-.streamlit/
+# --- Secrets ---
+# Only ignore the secrets file, not the whole folder (in case you add config.toml later)
+.streamlit/secrets.toml
+secrets.toml
 
-# Local Files Not to Share (even though your Excel is needed for now, 
-# if you were running local tests, these logs are useless)
+# --- Local Data (VPS will generate its own) ---
+# We ignore these so we don't spam GitHub with data updates
+database_snapshot.json
+market_snapshot.json
+
+# --- Logs & System Junk ---
 *.log
+.DS_Store
