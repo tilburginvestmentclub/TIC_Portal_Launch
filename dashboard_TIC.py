@@ -141,11 +141,11 @@ st.markdown("""
 # ==========================================
 # 2. DATA LAYER (REAL DATA FETCHING)
 # ==========================================
-# --- DIRECT GOOGLE SHEET AUTH ---
-def check_credentials_live(user_email, user_password):
-    """Checks credentials directly against the Google Sheet."""
+# --- DIRECT GOOGLE SHEET AUTH (SMART MATCHING) ---
+def check_credentials_live(user_input, user_password):
+    """Checks credentials against Email OR Username (Name -> name.surname)."""
     try:
-        # 1. Load Secrets & Connect
+        # 1. Connect
         creds_dict = dict(st.secrets["gcp_service_account"])
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
@@ -157,36 +157,34 @@ def check_credentials_live(user_email, user_password):
         # 2. Open Sheet
         sheet = client.open("TIC_Database_Master")
         ws = sheet.worksheet("Members")
-        records = ws.get_all_records() # List of dicts
+        records = ws.get_all_records()
         
-        # --- DEBUG: UNCOMMENT THE LINES BELOW IF IT STILL FAILS ---
-        st.write(f"Found {len(records)} rows in Sheet.")
-        if len(records) > 0:
-            st.write(f"Columns found: {list(records[0].keys())}")
-        # ----------------------------------------------------------
-
-        # 3. Prepare Inputs (Clean & Hash)
-        clean_email = user_email.strip().lower()
+        # 3. Prepare Inputs
+        clean_input = user_input.strip().lower()
         clean_pass = user_password.strip()
         hashed_pass = hashlib.sha256(clean_pass.encode('utf-8')).hexdigest()
         
         for row in records:
-            # Flexible Column Matching (Handle "Email" vs "Email Address")
-            row_email = str(row.get("Email", row.get("Email Address", ""))).strip().lower()
+            # A. Get Email
+            db_email = str(row.get("Email", "")).strip().lower()
             
-            # Flexible Password Matching (Handle "Password" vs "Pass")
-            row_pass = str(row.get("Password", row.get("Pass", ""))).strip()
+            # B. Generate Username from Name (e.g. "Senyo Azasoo" -> "senyo.azasoo")
+            raw_name = str(row.get("Name", "")).strip()
+            db_username = raw_name.lower().replace(" ", ".")
             
-            # Match Email
-            if row_email == clean_email:
-                # Match Password (Check BOTH plain text and hash)
-                # This fixes the issue if your sheet has "5e884..." but you typed "password"
-                if row_pass == clean_pass or row_pass == hashed_pass:
+            # C. Check if Input matches EITHER Email OR Username
+            if clean_input == db_email or clean_input == db_username:
+                
+                # Found the user! Now check password
+                db_pass = str(row.get("Password", "")).strip()
+                
+                # Check both plain text (old) and hash (new)
+                if db_pass == clean_pass or db_pass == hashed_pass:
                     return row.get("Role", "Member"), None 
                 else:
                     return None, "Incorrect Password"
                 
-        return None, f"User '{clean_email}' not found"
+        return None, f"User '{clean_input}' not found"
 
     except Exception as e:
         return None, f"Login System Error: {str(e)}"
