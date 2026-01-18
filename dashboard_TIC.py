@@ -20,6 +20,7 @@ import hashlib
 import json
 import extra_streamlit_components as stx
 from scipy.stats import norm
+import toml
 
 
 # --- GOOGLE SHEETS CONNECTION SETUP ---
@@ -140,7 +141,39 @@ st.markdown("""
 # ==========================================
 # 2. DATA LAYER (REAL DATA FETCHING)
 # ==========================================
+# --- DIRECT GOOGLE SHEET AUTH ---
+def check_credentials_live(user_email, user_password):
+    """Checks credentials directly against the Google Sheet."""
+    try:
+        # 1. Load Secrets
+        # We access st.secrets directly since we are in the dashboard
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        
+        # 2. Open Sheet
+        sheet = client.open("TIC_Database_Master")
+        ws = sheet.worksheet("Members")
+        records = ws.get_all_records() # List of dicts
+        
+        # 3. Check User
+        clean_email = user_email.strip().lower()
+        clean_pass = user_password.strip()
+        
+        for row in records:
+            # Adjust 'Email' and 'Password' keys to match your actual Sheet headers exactly!
+            row_email = str(row.get("Email", "")).strip().lower()
+            row_pass = str(row.get("Password", "")).strip()
+            
+            if row_email == clean_email and row_pass == clean_pass:
+                return row.get("Role", "Member"), None # Success
+                
+        return None, "Invalid email or password"
 
+    except Exception as e:
+        return None, f"Login System Error: {str(e)}"
+    
 @st.cache_data(ttl=1800)
 def fetch_macro_news():
     """Pulls real news from CNBC and Yahoo Finance RSS feeds"""
@@ -3560,19 +3593,40 @@ def main():
                 
                 # --- BUTTON 1: MEMBER LOGIN ---
                 if c_log.form_submit_button("Log In", type="primary"):
-                    user = authenticate(u, p, members)
-                    if user is not None:
-                        # SET THE COOKIE HERE (Expires in 30 days)
+                    # 1. Use the LIVE checker instead of the local 'authenticate' function
+                    role_found, error_msg = check_credentials_live(u, p)
+    
+                    if role_found:
+                        # 2. If Google Sheets says "Yes", we manually build the user session
+                        # We need to find the full user details from the 'members' dataframe to fill the profile
+                        # (The dataframe is safe to use for *reading* details, just not for password checking)
+                        user_row = members[members['u'] == u.lower().replace(" ", ".")]
+        
+                        if not user_row.empty:
+                            user = user_row.iloc[0].to_dict()
+                        else:
+                            # Fallback if user exists in Sheet but not in local JSON yet
+                            user = {
+                                'u': u, 'n': u, 'r': role_found, 'd': 'General', 
+                                'email': u, 'admin': False, 'value': 0, 'onboarded': 1
+                            }
+
+                        # 3. Save Cookie & Session
                         cookie_manager.set("tic_user", user['u'], expires_at=datetime.now() + timedelta(days=30))
-                        
-                        st.session_state['user'] = user.to_dict()
+                        st.session_state['user'] = user
                         st.session_state['logged_in'] = True
-                        
-                        # Track Login
-                        update_member_field_in_gsheet(user['u'], "Last Login", datetime.now().strftime('%Y-%m-%d %H:%M'))
+        
+                        # 4. Log the login
+                        threading.Thread(
+                            target=update_member_field_in_gsheet, 
+                            args=(user['u'], "Last Login", datetime.now().strftime('%Y-%m-%d %H:%M'))
+                        ).start()
+        
+                        st.toast(f"✅ Login Successful! Welcome {user.get('n', u)}")
+                        time.sleep(0.5)
                         st.rerun()
                     else: 
-                        st.error("Invalid Username or Password")
+                        st.error(f"Login Failed: {error_msg}")
 
                 # --- BUTTON 2: GUEST ACCESS ---
                 if c_guest.form_submit_button("Guest Access"):
